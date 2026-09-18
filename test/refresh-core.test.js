@@ -1,0 +1,224 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import {
+	discoverProvider,
+	endpointFor,
+	isBatchOnly,
+	mergeModels,
+	openRouterEntry,
+	parseModelsResponse,
+	refreshAll,
+	summarize,
+} from "../lib/refresh-core.js";
+
+test("isBatchOnly recognises :batch variants only", () => {
+	assert.equal(isBatchOnly("openai/gpt-6-astra:batch"), true);
+	assert.equal(isBatchOnly("nvidia/x:free"), false);
+	assert.equal(isBatchOnly("openai/gpt-6-astra"), false);
+});
+
+test("mergeModels keeps existing entries identical (order-preserving)", () => {
+	const existing = [
+		{ id: "a", contextWindow: 1000, compat: { thinkingFormat: "qwen-chat-template" } },
+		{ id: "b" },
+	];
+	const { models, added, removed } = mergeModels({
+		existing,
+		discovered: ["b", "a", "c"], // API order differs from the config order
+	});
+	// Configured order wins: a stays first (same object incl. hand-tuning),
+	// b second; only genuinely new ids are appended.
+	assert.deepEqual(models[0], existing[0]);
+	assert.deepEqual(models[1], existing[1]);
+	assert.deepEqual(models[2], { id: "c" }); // a new id becomes a minimal entry
+	assert.deepEqual(added, ["c"]);
+	assert.deepEqual(removed, []);
+	assert.equal(models.length, 3);
+});
+
+test("mergeModels drops ids the API no longer serves (and can keep them)", () => {
+	const existing = [{ id: "a" }, { id: "alt" }];
+	const dropped = mergeModels({ existing, discovered: ["a"] });
+	assert.deepEqual(dropped.removed, ["alt"]);
+	assert.equal(dropped.models.length, 1);
+	const kept = mergeModels({ existing, discovered: ["a"], dropRemoved: false });
+	assert.deepEqual(kept.models.map((entry) => entry.id), ["a", "alt"]);
+});
+
+test("mergeModels deduplicates the live response", () => {
+	const { models } = mergeModels({ existing: [], discovered: ["a", "a", "b"] });
+	assert.deepEqual(models, [{ id: "a" }, { id: "b" }]);
+});
+
+test("mergeModels: the same ids in a different API order are a no-op", () => {
+	// ki-server: 34 configured ids, and the live list serves exactly those ids
+	// in a different order — the merge may touch neither the order nor the
+	// changed flag, or every refresh would rewrite the file although nothing
+	// changed semantically.
+	const existing = ["a", "b", "c"].map((id) => ({ id }));
+	const { models, added, removed } = mergeModels({
+		existing,
+		discovered: ["c", "a", "b"],
+	});
+	assert.deepEqual(models, existing);
+	assert.deepEqual(added, []);
+	assert.deepEqual(removed, []);
+	// An unchanged pass must not trigger the write round:
+	// models.some((e,i)=>e!==current[i]) has to return false here.
+	assert.equal(
+		models.length !== existing.length || models.some((entry, index) => entry !== existing[index]),
+		false,
+	);
+});
+
+test("openRouterEntry: a catalog id stays minimal, a new id comes in rich", () => {
+	const record = {
+		id: "vendor/x",
+		name: "Vendor: X",
+		context_length: 123456,
+		top_provider: { max_completion_tokens: 4096 },
+		architecture: { input_modalities: ["text", "image"] },
+		supported_parameters: ["reasoning", "tools"],
+	};
+	assert.deepEqual(openRouterEntry(record, new Set(["vendor/x"])), { id: "vendor/x" });
+	assert.deepEqual(openRouterEntry(record, new Set()), {
+		id: "vendor/x",
+		name: "Vendor: X",
+		contextWindow: 123456,
+		maxTokens: 4096,
+		input: ["text", "image"],
+		reasoningEfforts: { off: null, low: "low", medium: "medium", high: "high" },
+	});
+});
+
+test("parseModelsResponse accepts data/models/bare array", () => {
+	assert.deepEqual(parseModelsResponse({ data: [{ id: "a" }] })[0].id, "a");
+	assert.deepEqual(parseModelsResponse({ models: [{ name: "b" }] })[0].id, "b");
+	assert.deepEqual(parseModelsResponse(["c"])[0].id, "c");
+	assert.equal(parseModelsResponse({ object: "list" }), undefined);
+});
+
+test("endpointFor: baseURL wins, the catalog is the fallback, otherwise undefined", () => {
+	const catalog = new Map([["zai", "https://api.z.ai/api/coding/paas/v4"]]);
+	assert.equal(endpointFor("x", { baseURL: "https://x/v1/" }, catalog).url, "https://x/v1/models");
+	assert.equal(endpointFor("zai", {}, catalog).url, "https://api.z.ai/api/coding/paas/v4/models");
+	assert.equal(endpointFor("zai", {}, catalog).auth, true);
+	assert.equal(endpointFor("openrouter", {}, new Map([["openrouter", "https://openrouter.ai/api/v1"]])).auth, false);
+	assert.equal(endpointFor("unknown-route", {}, catalog), undefined);
+});
+
+test("discoverProvider: header, failure, format", async () => {
+	const catalog = new Map([["p", "https://p/v1"]]);
+	let seen;
+	const fetchImpl = async (url, init) => {
+		seen = { url, authorization: init.headers.authorization };
+		return { ok: true, json: async () => ({ data: [{ id: "m" }] }) };
+	};
+	const hit = await discoverProvider({
+		providerId: "p",
+		profile: { apiKeyEnv: "P_KEY" },
+		catalogBaseUrls: catalog,
+		resolveKey: async () => "secret",
+		fetchImpl,
+	});
+	assert.equal(hit.ok, true);
+	assert.deepEqual(hit.records, [{ id: "m", display: undefined, raw: { id: "m" } }]);
+	assert.equal(seen.url, "https://p/v1/models");
+	assert.equal(seen.authorization, "Bearer secret");
+
+	const bad = await discoverProvider({
+		providerId: "p",
+		profile: { apiKeyEnv: "P_KEY" },
+		catalogBaseUrls: catalog,
+		resolveKey: async () => undefined,
+		fetchImpl: async () => ({ ok: false, status: 401 }),
+	});
+	assert.equal(bad.ok, false);
+	assert.equal(bad.error, "HTTP 401");
+});
+
+test("refreshAll: merge + changed detection + skip", async () => {
+	const providers = { a: { apiKeyEnv: "A" }, b: {}, skipme: {} };
+	const fetchImpl = async (url) => {
+		if (url === "https://a/v1/models")
+			return { ok: true, json: async () => ({ data: [{ id: "a1" }, { id: "a2" }] }) };
+		if (url === "https://b/v1/models") return { ok: true, json: async () => ({ models: ["b1"] }) };
+		throw new Error("nope");
+	};
+	const catalog = new Map([
+		["a", "https://a/v1"],
+		["b", "https://b/v1"],
+	]);
+	const results = await refreshAll({
+		providers,
+		existingModels: (id) => (id === "a" ? [{ id: "a1", name: "Old Entry" }] : undefined),
+		catalogBaseUrls: catalog,
+		resolveKey: async () => "k",
+		skip: new Set(["skipme"]),
+		fetchImpl,
+	});
+	assert.deepEqual(results.map((result) => result.id), ["a", "b"]);
+	assert.equal(results[0].changed, true);
+	assert.deepEqual(results[0].models, [{ id: "a1", name: "Old Entry" }, { id: "a2" }]);
+	assert.deepEqual(results[0].added, ["a2"]);
+	assert.equal(results[1].changed, true);
+	assert.equal(results[1].total, 1);
+	// an unchanged state is detected as changed=false
+	const again = await refreshAll({
+		providers,
+		existingModels: (id) => results.find((result) => result.id === id).models,
+		catalogBaseUrls: catalog,
+		resolveKey: async () => "k",
+		skip: new Set(["skipme"]),
+		fetchImpl,
+	});
+	assert.equal(again[0].changed, false);
+	assert.equal(again[1].changed, false);
+});
+
+test("summarize reports the pass", () => {
+	const line = summarize([
+		{ ok: true, total: 10, added: ["x"], removed: [] },
+		{ ok: false, total: 3, added: [], removed: [] },
+	]);
+	assert.match(line, /1 providers, 10 models/);
+	assert.match(line, /\+1 new/);
+	assert.match(line, /1 providers failed/);
+});
+
+test('discoverProvider: a fetch that never resolves is bounded by the deadline (no 409 wedge)', async () => {
+  const { discoverProvider } = await import('../lib/refresh-core.js')
+  // A fetchImpl that NEVER settles — can't be aborted (no signal support).
+  const hangingFetch = () => new Promise(() => {})
+  const t0 = Date.now()
+  const result = await discoverProvider({
+    providerId: 'sink',
+    profile: { baseURL: 'http://sink.test/v1' },
+    catalogBaseUrls: new Map(),
+    fetchImpl: hangingFetch,
+    timeoutMs: 200,
+  })
+  const elapsed = Date.now() - t0
+  assert.ok(!result.ok, 'hanging fetch must not yield ok')
+  assert.ok(result.error.length > 0, 'diagnostic present: ' + result.error)
+  assert.ok(elapsed < 2000, `bounded under time budget (took ${elapsed}ms)`)
+})
+
+test('discoverProvider: a hanging resolveKey is bounded too', async () => {
+  const { discoverProvider } = await import('../lib/refresh-core.js')
+  const okFetch = async () => ({ ok: true, json: async () => ({ data: ['a', 'b'] }) })
+  const hangingKey = () => new Promise(() => {})
+  const t0 = Date.now()
+  const result = await discoverProvider({
+    providerId: 'sink2',
+    profile: { baseURL: 'http://sink.test/v1', apiKeyEnv: 'SINK_KEY' },
+    catalogBaseUrls: new Map(),
+    resolveKey: hangingKey,
+    fetchImpl: okFetch,
+    timeoutMs: 300,
+  })
+  const elapsed = Date.now() - t0
+  // A hanging resolver must DEGRADE (timeout -> no key -> still fetch), never hang.
+  assert.ok(elapsed < 2000, `bounded under time budget (took ${elapsed}ms)`)
+  assert.ok(result !== undefined, 'returned a diagnostic')
+})

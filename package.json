@@ -1,0 +1,65 @@
+{
+  "name": "dsh-model-chooser",
+  "version": "0.1.1",
+  "description": "A searchable, sortable model picker for the DeepSeek Harness Web UI — provider groups, favorites, hidden-models blacklist, live per-task cost, prices and context windows, a refresh button that re-syncs every provider model list from its live API, and the same picker as the answer to a delegation's model question.",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "model-picker",
+    "model-selection",
+    "subagent",
+    "models.dev",
+    "llm",
+    "token-cost"
+  ],
+  "license": "MIT",
+  "author": "loonylabs-dev <info@loonylabs.dev>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/loonylabs-dev/dsh-model-chooser.git"
+  },
+  "bugs": {
+    "url": "https://github.com/loonylabs-dev/dsh-model-chooser/issues"
+  },
+  "homepage": "https://github.com/loonylabs-dev/dsh-model-chooser#readme",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib/refresh-core.js",
+    "lib/pi-catalog.js",
+    "bin/refresh-models.mjs",
+    "test/delegation-chooser.client.test.js",
+    "test/refresh-core.test.js",
+    "test/refresh-endpoint.test.js",
+    "test/cost-endpoint.test.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md",
+    "docs"
+  ],
+  "scripts": {
+    "test": "node --test test/cost-endpoint.test.js test/refresh-core.test.js test/refresh-endpoint.test.js test/delegation-chooser.client.test.js",
+    "prepublishOnly": "npm test"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

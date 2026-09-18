@@ -1,0 +1,2250 @@
+/**
+ * model-chooser — browser half (static bundle).
+ *
+ * Replaces the composer model seat (`conversation.input.model`) with a
+ * searchable, sortable model table:
+ *  - search by model name/description,
+ *  - sortable column headers (Name / Price), third click returns to the
+ *    provider-grouped view,
+ *  - favorites column (persistent, localStorage) with favorites-only toggle
+ *    in the column header,
+ *  - collapsible provider groups in the default view (state persisted),
+ *  - prices from https://models.dev/api.json (same source OpenCode uses);
+ *    shown as $input/$output per 1M tokens when known. Subscription routes
+ *    (all-zero cost in the catalog) resolve a REFERENCE price from their
+ *    pay-as-you-go provider via PROVIDER_ALIASES (e.g. kimi-for-coding →
+ *    moonshotai, alibaba-tp → alibaba-cn), so plan models still show what
+ *    their tokens would cost; local models stay unpriced by design,
+ *  - live per-task token usage (real provider usage from the session log)
+ *    always shown while the panel is open; the cost figure attributes each
+ *    model's usage to its OWN (reference) price, via the host endpoint
+ *    `/model-chooser/cost-history`. Hovering the cost FIGURE opens a
+ *    session breakdown popup (per-model totals + timestamped steps,
+ *    scrollable, copyable) from the same data; attribution of every step
+ *    to the model in effect comes from the log's request/context events —
+ *    nothing extra is persisted,
+ *  - hover tooltip with description, price, context window and efforts.
+ *
+ * The seat is a `single` slot with shadowing: registering at priority -1 wins
+ * over the native seat (registered at 0) without disturbing its registration.
+ *
+ * Styling follows the harness design system (dsw-alias / dsw-specific
+ * tokens, same geometry as the native ModelSelect: 28px pill trigger,
+ * 12px menu radius, 10px option radius, --dsw-shadow-lv3 elevation), so the
+ * picker matches light and dark theme automatically.
+ */
+window.__ModuleLoader__.load({
+  id: "dsh-model-chooser",
+  factory: (require) => {
+    var module = { exports: {} };
+    var exports = module.exports;
+    Object.defineProperty(exports, Symbol.toStringTag, { value: "Module" });
+    let React = require("react");
+    // react-dom is available in the harness module system (used for the
+    // tooltip portal); if it ever is not, the tooltip falls back to inline.
+    let ReactDOM = null;
+    try { ReactDOM = require("react-dom"); } catch { ReactDOM = null; }
+
+    // ---- static CSS (guarded, idempotent across hot reloads) ----
+    const CSS_ID = "model-chooser";
+    if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(CSS_ID) + "]") === null) {
+      const tag = document.createElement("style");
+      tag.dataset.plugin = "model-chooser";
+      tag.dataset.pluginCss = CSS_ID;
+      tag.textContent = [
+        ".mg-outer { position: relative; }",
+        ".mg-backdrop { position: fixed; inset: 0; z-index: 19; background: transparent; border: none; padding: 0; margin: 0; cursor: default; }",
+        // Trigger — same geometry as the native ModelSelect trigger (28px pill).
+        // Wrapped in a row so a reasoning-effort dropdown can sit next to it.
+        ".mg-trigger-row { display: inline-flex; align-items: center; gap: 6px; }",
+        ".mg-trigger { display: inline-flex; align-items: center; gap: 4px; height: 28px; min-width: 0; max-width: min(360px, 45cqw); padding: 0 4px 0 8px; border: none; border-radius: 24px; outline: none; background: transparent; color: var(--dsw-alias-label-secondary); cursor: pointer; font: inherit; font-size: 13px; font-weight: 500; line-height: 20px; white-space: nowrap; }",
+        ".mg-trigger:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }",
+        ".mg-trigger:focus-visible { box-shadow: 0 0 0 2px var(--dsw-alias-border-l3); }",
+        ".mg-trigger.locked { color: var(--dsw-alias-label-dimmed); cursor: default; }",
+        // Reasoning-effort trigger: visually identical to the model trigger.
+        ".mg-effort-outer { position: relative; display: inline-flex; align-items: center; }",
+        ".mg-effort-trigger { max-width: 110px; }",
+        ".mg-effort-label { flex: 0 1 auto; }",
+        // The floating effort menu — same surface, border, radius, shadow and
+        // z-order as the model picker panel (--mg-panel-bg).
+        ".mg-effort-menu { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 20; width: 168px; max-height: 320px; overflow-y: auto; padding: 4px; border: 0; border-radius: 20px; box-shadow: var(--dsw-elevation-prominent, var(--dsw-shadow-lv3)); --dsw-elevation-stroke-color: var(--dsw-alias-border-l1); --mg-panel-bg: var(--dsw-specific-menu); background: var(--mg-panel-bg); color: var(--dsw-alias-label-primary); }",
+        ".mg-effort-item { display: flex; align-items: center; gap: 8px; width: 100%; padding: 5px 8px; border: none; border-radius: 8px; background: transparent; color: var(--dsw-alias-label-primary); font: inherit; font-size: 13px; font-weight: 500; line-height: 20px; text-align: left; cursor: pointer; }",
+        ".mg-effort-item:hover { background: var(--dsw-alias-interactive-bg-hover); }",
+        ".mg-effort-item.active { color: var(--dsw-alias-state-business-primary); }",
+        ".mg-effort-item-check { margin-left: auto; flex: none; }",
+        ".mg-effort-item-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
+        ".mg-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }",
+        ".mg-chev { flex: none; color: var(--dsw-alias-label-caption); font-size: 10px; transition: transform var(--ds-transition-duration-fast, .12s) var(--ds-ease-in-out, ease); }",
+        // Rotation follows each trigger's OWN expanded state — the model
+        // chevron and the effort chevron never rotate each other.
+        ".mg-trigger[aria-expanded='true'] .mg-chev { transform: rotate(180deg); }",
+        // Panel — the native menu surface (same token, radius 20 and
+        // `--dsw-elevation-prominent` as the stock model menu) with a FIXED
+        // size, so light and dark theming match the harness exactly.
+        ".mg-panel { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 20; display: flex; flex-direction: column; width: min(440px, 100vw - 32px); height: min(480px, 100vh - 96px); overflow: hidden; --mg-panel-bg: var(--dsw-specific-menu); background: var(--mg-panel-bg); border: 0; border-radius: 20px; box-shadow: var(--dsw-elevation-prominent, var(--dsw-shadow-lv3)); --dsw-elevation-stroke-color: var(--dsw-alias-border-l1); color: var(--dsw-alias-label-primary); --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2); --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2); }",
+        ".mg-search { display: flex; align-items: center; gap: 6px; padding: 8px; border-bottom: 1px solid var(--dsw-alias-border-l2); }",
+        ".mg-search input { flex: 1; min-width: 0; box-sizing: border-box; height: 30px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--dsw-alias-border-l3); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font: inherit; font-size: 13px; line-height: 20px; outline: none; }",
+        ".mg-search input::placeholder { color: var(--dsw-alias-label-dimmed); }",
+        ".mg-search input:focus { border-color: var(--dsw-alias-state-business-primary); }",
+        ".mg-local { flex: none; display: inline-flex; align-items: center; height: 30px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--dsw-alias-border-l3); background: transparent; color: var(--dsw-alias-label-secondary); font: inherit; font-size: 12px; line-height: 18px; cursor: pointer; }",
+        ".mg-local:hover { background: var(--dsw-alias-interactive-bg-hover); }",
+        ".mg-local.on { background: var(--dsw-alias-state-business-tertiary); border-color: transparent; color: var(--dsw-alias-state-business-primary); }",
+        // Refresh (⟳) button shares the toggle geometry; while busy it stays
+        // highlighted (:disabled blocks clicks, the ellipsis signals work).
+        ".mg-refresh { padding: 0 9px; font-size: 14px; }",
+        ".mg-refresh:disabled { cursor: wait; }",
+        // Table header — clickable column titles, table-style sorting.
+        ".mg-thead { display: grid; grid-template-columns: 14px minmax(0,1fr) 44px 84px 24px 24px; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--dsw-alias-border-l2); background: var(--mg-panel-bg, var(--dsw-specific-menu)); font-size: 11px; font-weight: 600; line-height: 16px; text-transform: uppercase; letter-spacing: .04em; color: var(--dsw-alias-label-tertiary); }",
+        ".mg-th { display: inline-flex; align-items: center; gap: 4px; min-width: 0; padding: 0; border: none; background: transparent; font: inherit; text-transform: inherit; letter-spacing: inherit; color: inherit; cursor: pointer; }",
+        ".mg-th:hover { color: var(--dsw-alias-label-primary); }",
+        ".mg-th.active { color: var(--dsw-alias-state-business-primary); }",
+        ".mg-th.ctx, .mg-th.price { justify-content: flex-start; }",
+        ".mg-th.star { justify-content: center; font-size: 13px; text-transform: none; }",
+        ".mg-th .mg-ind { font-size: 8px; }",
+        ".mg-count { font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-caption); }",
+        ".mg-groups { flex: 1; min-height: 0; overflow-y: auto; padding: 0 4px 4px; }",
+        ".mg-group + .mg-group { margin-top: 4px; }",
+        // Group header — sticky like the native groupTitle.
+        ".mg-grouphead { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 6px; width: 100%; box-sizing: border-box; padding: 5px 8px 3px; font: inherit; font-size: 12px; font-weight: 500; line-height: 18px; color: var(--dsw-alias-label-tertiary); background: var(--mg-panel-bg, var(--dsw-specific-menu)); border: none; cursor: pointer; text-align: left; border-radius: 6px; }",
+        ".mg-caret { display: inline-block; width: 12px; flex: none; font-size: 9px; color: var(--dsw-alias-label-caption); transition: transform var(--ds-transition-duration-fast, .12s) var(--ds-ease-in-out, ease); }",
+        ".mg-grouphead.closed .mg-caret { transform: rotate(-90deg); }",
+        ".mg-badge { margin-left: auto; font-size: 11px; line-height: 16px; padding: 0 6px; border-radius: 8px; background: var(--dsw-alias-state-business-tertiary); color: var(--dsw-alias-state-business-primary); }",
+        ".mg-groupbody { overflow: hidden; }",
+        // Option rows — SAME fixed-width raster as .mg-thead: every row is its
+        // own grid container, so `auto` columns would size per row and break
+        // column alignment. Fixed px widths keep all rows in lockstep.
+        ".mg-model { display: grid; grid-template-columns: 14px minmax(0,1fr) 44px 84px 24px 24px; align-items: center; gap: 8px; width: 100%; min-height: 38px; box-sizing: border-box; padding: 6px 8px; border: none; border-radius: 10px; outline: none; background: transparent; color: var(--dsw-alias-label-primary); font: inherit; text-align: left; cursor: pointer; }",
+        ".mg-model:hover, .mg-model:focus-visible { background: var(--dsw-alias-interactive-bg-hover); }",
+        ".mg-check { text-align: center; font-size: 12px; line-height: 1; color: var(--dsw-alias-label-primary); }",
+        ".mg-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 500; line-height: 20px; }",
+        ".mg-name .mg-prov { font-size: 11px; font-weight: 400; color: var(--dsw-alias-label-caption); }",
+        ".mg-price { font-size: 12px; line-height: 18px; text-align: left; color: var(--dsw-alias-label-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }",
+        ".mg-ctx { font-size: 12px; line-height: 18px; text-align: left; color: var(--dsw-alias-label-tertiary); white-space: nowrap; overflow: hidden; font-variant-numeric: tabular-nums; }",
+        ".mg-star { cursor: pointer; font-size: 14px; line-height: 1; padding: 2px 3px; border-radius: 4px; text-align: center; color: var(--dsw-alias-label-caption); opacity: .6; }",
+        ".mg-model:hover .mg-star { opacity: 1; }",
+        ".mg-star.on { color: var(--dsw-alias-state-warn-primary); opacity: 1; }",
+        // Hide-from-list (✕) shares the star's row geometry — a small
+        // right-side button that only appears on hover. Clicking blacklists
+        // the model (or whole provider) so the picker list shrinks.
+        ".mg-hide { cursor: pointer; font-size: 12px; line-height: 1; padding: 2px 3px; border-radius: 4px; text-align: center; color: var(--dsw-alias-label-caption); opacity: 0; }",
+        ".mg-model:hover .mg-hide, .mg-grouphead:hover .mg-hide { opacity: 1; }",
+        ".mg-hide.on { color: var(--dsw-alias-state-business-primary); opacity: 1; }",
+        // Hidden-settings popup: a compact card listing the blacklisted
+        // providers and models, each with a "show" link to un-hide.
+        ".mg-hidepanel { position: absolute; left: 8px; right: 8px; top: 48px; z-index: 5; display: flex; flex-direction: column; box-sizing: border-box; max-height: 300px; overflow: hidden; padding: 9px 11px; border-radius: 10px; --mg-panel-bg: var(--dsw-specific-menu); background: var(--mg-panel-bg); box-shadow: var(--dsw-shadow-lv2); font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-primary); }",
+        ".mg-hidepanel-title { display: flex; align-items: center; gap: 8px; font-weight: 600; margin-bottom: 2px; }",
+        ".mg-hidepanel-clear { margin-left: auto; flex: none; height: 20px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l3, rgba(128,140,160,.45)); background: transparent; color: inherit; font: inherit; font-size: 11px; line-height: 18px; cursor: pointer; }",
+        ".mg-hidepanel-sect { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--dsw-alias-label-tertiary); margin: 6px 0 2px; }",
+        ".mg-hidepanel-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }",
+        ".mg-hideitem { display: flex; align-items: center; gap: 6px; padding: 1px 0; font-size: 11.5px; }",
+        ".mg-hideitem-prov { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--dsw-alias-label-caption); flex: none; }",
+        ".mg-hideitem-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }",
+        ".mg-hideitem-show { flex: none; height: 18px; padding: 0 7px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l3, rgba(128,140,160,.45)); background: transparent; color: inherit; font: inherit; font-size: 11px; line-height: 16px; cursor: pointer; }",
+        ".mg-hidepanel-empty { color: var(--dsw-alias-label-tertiary); font-style: italic; }",
+        ".mg-empty { padding: 10px; text-align: center; color: var(--dsw-alias-label-tertiary); font-size: 13px; line-height: 20px; }",
+        ".mg-status { padding: 6px 10px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-tertiary); }",
+        ".mg-error { margin: 4px 8px 0; padding: 7px 8px; border-radius: 8px; background: var(--dsw-alias-interactive-bg-hover-danger); color: var(--dsw-alias-state-error-primary); font-size: 12px; line-height: 18px; }",
+        ".mg-cost { padding: 6px 10px; border-top: 1px solid var(--dsw-alias-border-l2); font-size: 12px; line-height: 18px; color: var(--dsw-alias-state-business-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }",
+        ".mg-cost-detail { color: var(--dsw-alias-label-tertiary); }",
+        // The reasoning-effort choice lives in the chat composer next to the
+        // model name (mg-effort-outer/menu) — no UI for it inside the panel.
+        // The cost figure sits inside an INVISIBLE padded hover target that
+        // reaches all the way to the row's LEFT edge (negative margin eats
+        // the row's left padding) — comfortable to hit, nothing drawn,
+        // opens the breakdown popup.
+        ".mg-costbtn { display: inline-block; padding: 1px 8px 1px 10px; margin: -1px 0 -1px -10px; border: 1px solid transparent; border-radius: 8px; cursor: help; }",
+        // Interactive popup: the pointer may enter it, scroll the step list
+        // and press the copy button.
+        ".mg-costpop { position: fixed; z-index: 1001; display: flex; flex-direction: column; box-sizing: border-box; width: 380px; overflow: hidden; padding: 9px 11px; border-radius: 10px; --mg-panel-bg: var(--dsw-specific-menu); background: var(--mg-panel-bg); box-shadow: var(--dsw-shadow-lv2); pointer-events: auto; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-primary); overscroll-behavior: contain; }",
+        // Only the step list scrolls; title + model summary stay pinned.
+        // flex:1 + min-height:0 is what makes the scroll area reachable
+        // to its very top (a plain overflow-y:auto flex child clips it).
+        ".mg-costpop-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; scrollbar-width: thin; overscroll-behavior: contain; }",
+        ".mg-costpop-title { display: flex; align-items: center; gap: 8px; font-weight: 600; margin-bottom: 4px; }",
+        // copy + export sit side by side as one unit, pushed to the right.
+        ".mg-costpop-btns { margin-left: auto; flex: none; display: inline-flex; align-items: center; gap: 8px; }",
+        ".mg-costpop-copy { flex: none; height: 20px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l3, rgba(128,140,160,.45)); background: transparent; color: inherit; font: inherit; font-size: 11px; line-height: 18px; cursor: pointer; opacity: .85; }",
+        ".mg-costpop-copy:hover { opacity: 1; background: var(--dsw-alias-interactive-bg-hover); }",
+        // Table headers (pinned) share the same column raster as the rows.
+        ".mg-costpop-th { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--dsw-alias-label-tertiary); }",
+        // Clickable column headers — sort asc → desc → off, like the panel.
+        ".mg-costpop-h { display: inline-flex; align-items: center; gap: 3px; padding: 0; border: none; background: transparent; font: inherit; text-transform: inherit; letter-spacing: inherit; color: inherit; cursor: pointer; }",
+        ".mg-costpop-h:hover { color: var(--dsw-alias-label-primary); }",
+        ".mg-costpop-h .mg-ind { font-size: 8px; }",
+        ".mg-costpop-h.n { width: 100%; justify-content: flex-end; }",
+        // Model summary table: Model | × | In | Out | Cache | ≈
+        ".mg-costpop-models, .mg-costpop-mrow { display: grid; grid-template-columns: minmax(0,1fr) 30px 46px 46px 54px 58px; gap: 6px; align-items: center; }",
+        ".mg-costpop-mrow { padding: 2px 0; }",
+        // Step table: Time | Model | In | Out | Cache
+        ".mg-costpop-steps, .mg-costpop-step { display: grid; grid-template-columns: 74px minmax(0,1fr) 46px 46px 54px; gap: 6px; align-items: center; }",
+        ".mg-costpop-step { padding: 2px 0; }",
+        ".mg-costpop-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }",
+        ".mg-costpop-num { text-align: right; font-size: 11px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-secondary); white-space: nowrap; }",
+        ".mg-costpop-time { font-size: 11px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-tertiary); white-space: nowrap; }",
+        ".mg-costpop-step.dim { opacity: .55; }",
+        ".mg-costpop-sep { margin: 6px 0 4px; border-top: 1px solid var(--dsw-alias-border-l2, rgba(128,140,160,.35)); }",
+        // Tooltip — harness tooltip surface (dark in both themes). Rendered
+        // through a body portal (see below), so it must win against every app
+        // stacking context: z-index well above panels/menus.
+        ".mg-tooltip { position: fixed; z-index: 1000; min-width: 200px; max-width: 320px; padding: 9px 11px; border-radius: 10px; --mg-panel-bg: var(--dsw-specific-menu); background: var(--mg-panel-bg); box-shadow: var(--dsw-shadow-lv2); pointer-events: none; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-primary); }",
+        ".mg-tt-name { font-size: 13px; font-weight: 600; line-height: 20px; margin-bottom: 2px; }",
+        ".mg-tt-prov { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--dsw-alias-state-business-primary); margin-bottom: 5px; }",
+        ".mg-tt-id { font-family: var(--ds-font-family-code); font-size: 10.5px; color: var(--dsw-alias-label-secondary); margin: 2px 0 5px; word-break: break-all; }",
+        ".mg-tt-desc { color: var(--dsw-alias-label-secondary); margin-bottom: 6px; }",
+        ".mg-tt-row { font-size: 10.5px; color: var(--dsw-alias-label-tertiary); }",
+        ".mg-tt-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; padding-top: 5px; border-top: 1px solid var(--dsw-alias-border-l2); font-size: 10.5px; color: var(--dsw-alias-label-caption); }",
+        // ---- delegation question card (the picker answering a model question) ----
+        // Same surfaces, tokens and row grid as the composer panel, so the dialog
+        // is recognisably the same picker instead of a second visual language.
+        ".mg-qanswer { display: flex; flex-direction: column; width: 100%; max-width: var(--dsh-chat-content-width); max-height: min(60vh, 520px); margin: 6px auto 10px; box-sizing: border-box; overflow: hidden; border: 1px solid var(--dsw-alias-state-business-primary); border-radius: 16px; background: var(--dsw-specific-input-major); color: var(--dsw-alias-label-primary); box-shadow: var(--dsw-shadow-lv2); }",
+        ".mg-qhead { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-shrink: 0; padding: 10px 14px; background: var(--dsw-alias-state-business-tertiary); color: var(--dsw-alias-state-business-primary); font-size: 13px; line-height: 18px; }",
+        ".mg-qtitle { font-weight: 600; }",
+        ".mg-qclose { cursor: pointer; font-size: 12px; line-height: 1; padding: 2px 4px; border-radius: 4px; }",
+        ".mg-qclose:hover { background: var(--dsw-alias-interactive-bg-hover); }",
+        ".mg-qdetail { flex-shrink: 0; max-height: 120px; overflow-y: auto; padding: 10px 14px 2px; font-size: 12px; line-height: 18px; color: var(--dsw-alias-label-secondary); }",
+        ".mg-qerror { flex-shrink: 0; padding: 4px 14px; color: var(--dsw-alias-state-error-primary); font-size: 12px; line-height: 18px; }",
+        ".mg-qactions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-shrink: 0; padding: 8px 14px 12px; border-top: 1px solid var(--dsw-alias-border-l2); }",
+        ".mg-qbtn { height: 30px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--dsw-alias-border-l2); background: transparent; color: var(--dsw-alias-label-primary); font: inherit; font-size: 13px; cursor: pointer; }",
+        ".mg-qbtn:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover); }",
+        ".mg-qbtn:disabled { opacity: .5; cursor: default; }",
+        ".mg-sort { border: none; background: transparent; color: var(--dsw-alias-label-secondary); font: inherit; font-size: 12px; cursor: pointer; padding: 0 2px; }",
+        ".mg-sort:hover { color: var(--dsw-alias-label-primary); }",
+        ".mg-qanswer .mg-groups { padding: 0 4px 6px; }"
+      ].join("\n");
+      document.head.appendChild(tag);
+    }
+
+    // ---- Favorites + collapsed state: localStorage, memoized per page ----
+    function storedList(key) {
+      try {
+        const raw = globalThis.localStorage.getItem(key);
+        if (!raw) return [];
+        const arr = JSON.parse(raw);
+        return Array.isArray(arr) ? arr.filter((x) => typeof x === "string") : [];
+      } catch { return []; }
+    }
+    function persistList(key, list) {
+      try { globalThis.localStorage.setItem(key, JSON.stringify(list)); } catch {}
+    }
+
+    const FAV_KEY = "dsh.modelchooser.favorites";
+    let favCache = null;
+    function readFavs() {
+      if (favCache === null) favCache = storedList(FAV_KEY);
+      return favCache;
+    }
+    function hasFav(provider, model) {
+      return readFavs().indexOf(provider + "::" + model) !== -1;
+    }
+    function toggleFav(provider, model) {
+      const key = provider + "::" + model;
+      const list = readFavs().slice();
+      const i = list.indexOf(key);
+      if (i === -1) list.push(key); else list.splice(i, 1);
+      favCache = list;
+      persistList(FAV_KEY, list);
+    }
+
+    const COLL_KEY = "dsh.modelchooser.collapsed";
+    let collCache = null;
+    function readCollapsed() {
+      if (collCache === null) collCache = storedList(COLL_KEY);
+      return collCache;
+    }
+    function isCollapsed(provider) {
+      return readCollapsed().indexOf(provider) !== -1;
+    }
+    function toggleCollapsed(provider) {
+      const list = readCollapsed().slice();
+      const i = list.indexOf(provider);
+      if (i === -1) list.push(provider); else list.splice(i, 1);
+      collCache = list;
+      persistList(COLL_KEY, list);
+    }
+
+    // ---- Hidden models/providers blacklist: localStorage, memoized ----
+    // "Hide" is a personal display preference: removing models (or whole
+    // providers) shrinks the picker to what the user actually wants to see —
+    // a fast alternative to entering a search query every time. Stored like
+    // favorites/collapse state, so it survives reloads. Model keys use the
+    // same "provider::model" convention as favorites; provider ids are kept
+    // in a parallel list so a whole group can vanish at once.
+    const HIDDEN_KEY = "dsh.modelchooser.hidden"; // { providers: [], models: [] }
+    let hiddenCache = null;
+    function readHidden() {
+      if (hiddenCache === null) {
+        let providers = [], models = [];
+        try {
+          const raw = globalThis.localStorage.getItem(HIDDEN_KEY);
+          if (raw) {
+            const obj = JSON.parse(raw);
+            if (obj && typeof obj === "object") {
+              if (Array.isArray(obj.providers)) providers = obj.providers.filter((x) => typeof x === "string");
+              if (Array.isArray(obj.models)) models = obj.models.filter((x) => typeof x === "string");
+            }
+          }
+        } catch {}
+        hiddenCache = { providers, models };
+      }
+      return hiddenCache;
+    }
+    function persistHidden() {
+      try { globalThis.localStorage.setItem(HIDDEN_KEY, JSON.stringify(hiddenCache)); } catch {}
+    }
+    function isHiddenProvider(provider) {
+      return readHidden().providers.indexOf(String(provider)) !== -1;
+    }
+    function isHiddenModel(provider, model) {
+      return readHidden().models.indexOf(String(provider) + "::" + String(model)) !== -1;
+    }
+    function toggleHiddenProvider(provider) {
+      const h = readHidden();
+      const id = String(provider);
+      const i = h.providers.indexOf(id);
+      if (i === -1) h.providers.push(id); else h.providers.splice(i, 1);
+      persistHidden();
+    }
+    function toggleHiddenModel(provider, model) {
+      const h = readHidden();
+      const key = String(provider) + "::" + String(model);
+      const i = h.models.indexOf(key);
+      if (i === -1) h.models.push(key); else h.models.splice(i, 1);
+      persistHidden();
+    }
+    function clearHidden() {
+      hiddenCache = { providers: [], models: [] };
+      persistHidden();
+    }
+    function hiddenCount() {
+      const h = readHidden();
+      return h.providers.length + h.models.length;
+    }
+
+    // ---- Prices from https://models.dev/api.json (OpenCode's source) ----
+    // Local models (e.g. llama.cpp / Ollama-style gateways) are NOT in the
+    // public catalog, so they get no price; hosted providers (openrouter,
+    // deepseek, openai, ...) show $input/$output per 1M tokens.
+    const PRICE_KEY = "dsh.modelchooser.prices";
+    const PRICE_URL = "https://models.dev/api.json";
+    const PRICE_TTL = 86400000; // refresh at most once per day
+    const PRICE_RETRY = 30000; // after a failed fetch wait 30s before retrying
+    // Auto model-list update: re-load the provider/model directory while the
+    // picker is mounted so newly added models appear without reopening.
+    const MODEL_LIST_REFRESH_MS = 5 * 60 * 1000; // every 5 minutes
+    let priceMap = null; // { "provider::model": { input?, output?, cacheRead?, cacheWrite?, context?, maxOutput? } }
+    let pricesFailedAt = 0;
+
+    function loadPriceCache() {
+      try {
+        const raw = globalThis.localStorage.getItem(PRICE_KEY);
+        if (!raw) return null;
+        const p = JSON.parse(raw);
+        if (p && typeof p === "object" && p.map && typeof p.at === "number") return p;
+      } catch {}
+      return null;
+    }
+    function cacheFresh(c) {
+      return !!c && (Date.now() - c.at) < PRICE_TTL;
+    }
+    // Provider-id aliases: a DSH route id can differ from the models.dev
+    // catalog id (e.g. route "deepseek-official" vs. catalog "deepseek").
+    // Aliases double as REFERENCE-PRICE sources for subscription routes:
+    // models.dev lists plan providers (kimi-for-coding, alibaba-token-plan)
+    // with an all-zero cost, so we fall back to the pay-as-you-go catalog id
+    // to still show what the tokens would cost at API rates.
+    const PROVIDER_ALIASES = {
+      "deepseek-official": "deepseek",
+      "alibaba-tp": "alibaba-cn",
+      "kimi-for-coding": "moonshotai",
+      "oneprovider": "anthropic",
+    };
+    // Model-id rewrites applied when looking up the aliased provider
+    // (e.g. route model "k3" vs. catalog model "kimi-k3").
+    const MODEL_ALIASES = {
+      "kimi-for-coding": {
+        "k3": "kimi-k3",
+        "k3-256k": "kimi-k3",
+        "k2.7-code": "kimi-k2.7-code",
+        "kimi-for-coding": "kimi-k2.7-code",
+        "kimi-for-coding-highspeed": "kimi-k2.7-code",
+      },
+    };
+    // Subscription-plan entries carry an all-zero cost in models.dev; treat
+    // them as "no price" so the alias/reference fallback below kicks in.
+    function zeroCost(e) {
+      return !!e && (e.input || 0) === 0 && (e.output || 0) === 0 &&
+        (e.cacheRead || 0) === 0 && (e.cacheWrite || 0) === 0;
+    }
+    function priceFor(provider, model) {
+      if (!priceMap) return undefined;
+      const direct = priceMap["" + provider + "::" + model];
+      if (direct && !zeroCost(direct)) return direct;
+      const alias = PROVIDER_ALIASES[provider];
+      if (alias) {
+        const am = MODEL_ALIASES[provider] && MODEL_ALIASES[provider][model];
+        const ref = (am ? priceMap[alias + "::" + am] : undefined) || priceMap[alias + "::" + model];
+        if (ref && !zeroCost(ref)) return ref;
+      }
+      return undefined;
+    }
+    // True when models.dev knows the model but lists an all-zero cost, i.e.
+    // the route is a subscription/plan product without per-token pricing.
+    function subscriptionFor(provider, model) {
+      if (!priceMap) return false;
+      return zeroCost(priceMap["" + provider + "::" + model]);
+    }
+    // Compact money for tight columns: 2 decimals normally, 4 for sub-cent
+    // prices, trailing zeros trimmed ($1.77744 -> $1.78, $0.00280 -> $0.0028).
+    function fmtMoneyShort(x) {
+      if (typeof x !== "number" || !isFinite(x)) return "";
+      const d = Math.abs(x) < 0.01 ? 4 : 2;
+      let s = x.toFixed(d);
+      if (s.indexOf(".") !== -1) s = s.replace(/0+$/, "").replace(/\.$/, "");
+      return s;
+    }
+    function formatPrice(c) {
+      if (!c) return "";
+      const parts = [];
+      if (typeof c.input === "number") parts.push("$" + fmtMoneyShort(c.input));
+      if (typeof c.output === "number") parts.push("$" + fmtMoneyShort(c.output));
+      return parts.length === 0 ? "" : parts.join("/");
+    }
+    function formatTokens(n) {
+      if (typeof n !== "number" || !isFinite(n)) return "";
+      if (n >= 1e6) return String(Math.round(n / 1e6)) + "M";
+      if (n >= 1e3) return String(Math.round(n / 1e3)) + "K";
+      return String(n);
+    }
+    // Cost math (per 1M tokens), like OpenCode: real usage x model price.
+    function estimateCost(price, usage) {
+      if (!usage) return null;
+      const inT = usage.inputTokens || 0;
+      const outT = usage.outputTokens || 0;
+      const cacheRT = usage.cacheReadTokens || 0;
+      const cacheWT = usage.cacheWriteTokens || 0;
+      let total = 0;
+      if (price) {
+        if (typeof price.input === "number") total += (inT / 1e6) * price.input;
+        if (typeof price.output === "number") total += (outT / 1e6) * price.output;
+        if (typeof price.cacheRead === "number") total += (cacheRT / 1e6) * price.cacheRead;
+        if (typeof price.cacheWrite === "number") total += (cacheWT / 1e6) * price.cacheWrite;
+      }
+      return {
+        total,
+        hasPrice: !!(price && (typeof price.input === "number" || typeof price.output === "number")),
+        inputTokens: inT,
+        outputTokens: outT,
+        cacheReadTokens: cacheRT,
+        cacheWriteTokens: cacheWT,
+        steps: usage.steps || 0,
+      };
+    }
+    function formatMoney(x) {
+      if (typeof x !== "number" || !isFinite(x)) return "–";
+      if (x === 0) return "$0";
+      if (x < 0.01) return "$" + x.toFixed(4);
+      return "$" + x.toFixed(2);
+    }
+    function fetchPrices() {
+      const cached = loadPriceCache();
+      if (cacheFresh(cached)) {
+        priceMap = cached.map;
+        return Promise.resolve(priceMap);
+      }
+      // Back off after a failure so a blocked endpoint is not hammered.
+      if (pricesFailedAt !== 0 && (Date.now() - pricesFailedAt) < PRICE_RETRY) {
+        if (priceMap === null && cached) priceMap = cached.map; // stale beats nothing
+        return Promise.resolve(priceMap || {});
+      }
+      return globalThis.fetch(PRICE_URL)
+        .then(function (r) { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
+        .then(function (d) {
+          const map = {};
+          if (d && typeof d === "object") {
+            for (const pid in d) {
+              const prov = d[pid];
+              if (!prov || typeof prov !== "object" || !prov.models) continue;
+              for (const mid in prov.models) {
+                const m = prov.models[mid];
+                if (!m || typeof m !== "object") continue;
+                const entry = {};
+                const c = m.cost;
+                if (c && typeof c === "object") {
+                  if (typeof c.input === "number") entry.input = c.input;
+                  if (typeof c.output === "number") entry.output = c.output;
+                  if (typeof c.cache_read === "number") entry.cacheRead = c.cache_read;
+                  if (typeof c.cache_write === "number") entry.cacheWrite = c.cache_write;
+                }
+                const lim = m.limit;
+                if (lim && typeof lim === "object") {
+                  if (typeof lim.context === "number") entry.context = lim.context;
+                  if (typeof lim.output === "number") entry.maxOutput = lim.output;
+                }
+                if (Object.keys(entry).length) map[pid + "::" + mid] = entry;
+              }
+            }
+          }
+          priceMap = map;
+          pricesFailedAt = 0;
+          try {
+            globalThis.localStorage.setItem(PRICE_KEY, JSON.stringify({ at: Date.now(), map: map }));
+          } catch {}
+          return priceMap;
+        })
+        .catch(function () {
+          // Endpoint unreachable / blocked: keep stale data, retry in 30s.
+          pricesFailedAt = Date.now();
+          if (priceMap === null && cached) priceMap = cached.map;
+          return priceMap || {};
+        });
+    }
+    // Synchronous restore so the first open shows cached prices instantly,
+    // even when the cache is stale (fetchPrices then refreshes in background).
+    (function initPrices() {
+      const cached = loadPriceCache();
+      if (cached) priceMap = cached.map;
+    })();
+
+    // ---- Capability catalog from the host (same-origin, adapter-owned data) ----
+    // Covers LOCAL providers too (llama.cpp / Ollama-style gateways), which
+    // models.dev does not know. The host caches the build; the client keeps it
+    // in memory for the page lifetime.
+    let catalogMap = null; // { "provider::model": { context?, maxOutput? } }
+    function fetchCatalog() {
+      if (catalogMap !== null) return Promise.resolve(catalogMap);
+      return globalThis.fetch("/model-chooser/catalog")
+        .then(function (r) { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
+        .then(function (d) {
+          catalogMap = (d && typeof d === "object") ? d : {};
+          return catalogMap;
+        })
+        .catch(function () {
+          catalogMap = {};
+          return catalogMap;
+        });
+    }
+    // Context window / max output: host adapter data wins, models.dev fallback.
+    function contextFor(provider, model) {
+      const key = "" + provider + "::" + model;
+      if (catalogMap && catalogMap[key] && typeof catalogMap[key].context === "number") {
+        return catalogMap[key].context;
+      }
+      const p = priceMap ? priceMap[key] : undefined;
+      return p && typeof p.context === "number" ? p.context : null;
+    }
+    function maxOutputFor(provider, model) {
+      const key = "" + provider + "::" + model;
+      if (catalogMap && catalogMap[key] && typeof catalogMap[key].maxOutput === "number") {
+        return catalogMap[key].maxOutput;
+      }
+      const p = priceMap ? priceMap[key] : undefined;
+      return p && typeof p.maxOutput === "number" ? p.maxOutput : null;
+    }
+    // "Local" tag: the host catalog knows the provider's real endpoint
+    // (baseURL from settings). Only while no catalog data exists do we fall
+    // back to the old heuristic (no price entry → probably local).
+    function localFor(provider, model) {
+      const key = "" + provider + "::" + model;
+      if (catalogMap && catalogMap[key] && typeof catalogMap[key].local === "boolean") {
+        return catalogMap[key].local;
+      }
+      return priceFor(provider, model) === undefined;
+    }
+
+    // Provider routes hidden from the picker: the vision toolkit mirrors every
+    // provider as "vision-toolkit-<provider>" for its internal vision routing.
+    // They are real routes (removing them would break the toolkit) but pure
+    // noise in a model selector.
+    const HIDDEN_PROVIDER_PREFIXES = ["vision-toolkit-"];
+    function providerHidden(id) {
+      return HIDDEN_PROVIDER_PREFIXES.some((p) => id.indexOf(p) === 0);
+    }
+
+    // ---- Delegation questions: the same picker answers a model question -------
+    //
+    // The subagent router asks one question per delegation (id `subagent-model`)
+    // and accepts either one of its own answers or a route label `provider::model`.
+    // This entry claims the composer while such a question is pending and renders
+    // the model list; every other question keeps the stock question card.
+    //
+    // It reads the SESSION's model directory — the same list the composer seat
+    // shows — but never calls directory.select(): that would change the session's
+    // own model, while this answer belongs to the delegating tool call. It is
+    // handed back through the question carrier instead.
+    const DELEGATION_QUESTION_ID = "subagent-model";
+    // The router's two reserved answers. Coupling rather than coincidence: both
+    // plugins are ours, and the router pins these labels in its own tests.
+    const ROUTER_PARENT_PREFIX = "Keep the parent model";
+    const ROUTER_AUTO_LABEL = "Auto for this session";
+
+    /** The router's question inside a pending carrier, or null for any other request. */
+    function delegationQuestion(wait) {
+      const questions = wait && wait.payload ? wait.payload.questions : null;
+      if (!Array.isArray(questions) || questions.length !== 1) return null;
+      const question = questions[0];
+      return question && question.id === DELEGATION_QUESTION_ID ? question : null;
+    }
+
+    /** Chain routing: claim the composer for the router's question only. */
+    function selectDelegation(owner) {
+      const interactions = owner ? owner.interactions : null;
+      if (!Array.isArray(interactions)) return null;
+      for (const entry of interactions) {
+        if (entry && entry.kind === "question" && delegationQuestion(entry) !== null) return entry;
+      }
+      return null;
+    }
+
+    /**
+     * The router's parent option: its label, plus the route a child would inherit.
+     * The route is read out of the label's parentheses, which is why the router
+     * puts it there.
+     */
+    function inheritedChoice(question) {
+      const options = Array.isArray(question.options) ? question.options : [];
+      for (const option of options) {
+        if (typeof option.label !== "string" || option.label.indexOf(ROUTER_PARENT_PREFIX) !== 0) continue;
+        const match = /\(([^()\s]+)::([^()]+)\)\s*$/.exec(option.label);
+        return {
+          label: option.label,
+          provider: match ? match[1] : null,
+          model: match ? match[2].trim() : null,
+        };
+      }
+      return null;
+    }
+
+    /** The router's auto answer, or null when the question does not offer it. */
+    function autoChoice(question) {
+      const options = Array.isArray(question.options) ? question.options : [];
+      for (const option of options) {
+        if (option.label === ROUTER_AUTO_LABEL) return option;
+      }
+      return null;
+    }
+
+    /**
+     * The router's configured lanes: every option that is neither its parent answer
+     * nor its auto answer. They stay reachable here as a quick-choice group, so a
+     * configured lane never disappears merely because this list is longer than the
+     * dialog's options were.
+     */
+    function quickChoices(question) {
+      const options = Array.isArray(question.options) ? question.options : [];
+      return options.filter(option => typeof option.label === "string"
+        && option.label.indexOf(ROUTER_PARENT_PREFIX) !== 0
+        && option.label !== ROUTER_AUTO_LABEL);
+    }
+
+    /** Cheap-first price ordering: an unpriced or subscription route sorts last. */
+    function priceSortValue(provider, model) {
+      const entry = priceFor(provider, model);
+      if (entry && typeof entry.input === "number") return entry.input;
+      return Number.POSITIVE_INFINITY;
+    }
+
+    /** Context-window ordering: an unknown window sorts last. */
+    function contextSortValue(provider, model) {
+      const window_ = contextFor(provider, model);
+      return window_ === null ? Number.NEGATIVE_INFINITY : window_;
+    }
+
+    /**
+     * The delegation question's answer surface: the seat's list, the router's
+     * answers, and a route label for everything else.
+     * @param props - framework shares plus the entry's inject face and `matched`.
+     */
+    function DelegationChooser(props) {
+      const wait = props.matched;
+      const question = delegationQuestion(wait) ?? { id: DELEGATION_QUESTION_ID, question: "", options: [] };
+      const inherited = inheritedChoice(question);
+      const auto = autoChoice(question);
+      const quick = quickChoices(question);
+      const directory = props.directory;
+      const emptySnapshot = React.useMemo(() => ({
+        current: null, routable: null, groups: [], failures: [], status: "idle", error: null,
+      }), []);
+      const state = React.useSyncExternalStore(
+        React.useCallback((cb) => (directory && typeof directory.subscribe === "function" ? directory.subscribe(cb) : () => {}), [directory]),
+        React.useCallback(() => (directory && typeof directory.getSnapshot === "function" ? directory.getSnapshot() : emptySnapshot), [directory, emptySnapshot]),
+        () => emptySnapshot,
+      );
+      const [query, setQuery] = React.useState("");
+      const [favOnly, setFavOnly] = React.useState(false);
+      const [sort, setSort] = React.useState(null); // { key: 'name'|'provider'|'price'|'ctx', dir: 1|-1 } | null
+      const [busy, setBusy] = React.useState(null);
+      const [failure, setFailure] = React.useState(null);
+      const [, setTick] = React.useState(0);
+
+      const load = props.load;
+      const available = props.available;
+      // Ask for the session's models once per mount. A rejection is not handled
+      // here: the directory store records the outcome in its own snapshot
+      // (`status`/`error`), which this dialog reads below — swallowing it here as
+      // well would have hidden it twice.
+      const asked = React.useRef(false);
+      React.useEffect(() => {
+        if (asked.current) return;
+        asked.current = true;
+        if (available === false || typeof load !== "function") return;
+        try {
+          const pending = load();
+          if (pending && typeof pending.catch === "function") pending.catch(() => {});
+        } catch {
+          // Reported through the store's snapshot, exactly like a rejection.
+        }
+      }, [load, available]);
+
+      /** Deliver one answer batch to the waiting tool call. */
+      /**
+       * Deliver one answer batch.
+       *
+       * `asRoute` marks an answer the dialog's own options do not carry: the host
+       * validates `selected` against the offered option labels (measured in
+       * `packages/host/apiproxy` `matchesQuestions`, which rejects anything else as
+       * `bad-response`), so a route this picker found in the session's catalog must
+       * travel in the protocol's free-text `custom` field instead — which the same
+       * validator accepts, and which a single-choice question requires INSTEAD of a
+       * selection.
+       */
+      const deliver = async (label, asRoute = false) => {
+        if (busy !== null) return;
+        setBusy(label);
+        setFailure(null);
+        try {
+          const receipt = await wait.respond({
+            ok: true,
+            value: {
+              sessionId: wait.sessionId,
+              answer: {
+                answers: [{
+                  id: question.id,
+                  selected: asRoute ? [] : [label],
+                  ...asRoute ? { custom: label } : {},
+                }],
+              },
+            },
+          });
+          if (!receipt || receipt.accepted !== true) {
+            throw new Error(receipt && receipt.reason ? String(receipt.reason) : "the host rejected the answer");
+          }
+        } catch (error) {
+          setBusy(null);
+          setFailure("could not deliver the answer: " + (error && error.message ? error.message : String(error)));
+        }
+      };
+
+      /** Dismiss the question; the router then keeps the route it had configured. */
+      const dismiss = async () => {
+        if (busy !== null) return;
+        setBusy("dismiss");
+        try {
+          await wait.respond({
+            ok: false,
+            error: { code: "cancelled", message: "the delegation question was dismissed", details: {} },
+          });
+        } catch (error) {
+          setBusy(null);
+          setFailure("could not dismiss the question: " + (error && error.message ? error.message : String(error)));
+        }
+      };
+
+      /** One row: confirming the inherited route is the router's own "no change" answer. */
+      const pick = (provider, model) => {
+        if (inherited && inherited.label !== null && inherited.provider === provider && inherited.model === model) {
+          return deliver(inherited.label);
+        }
+        // Any other row is a route the question did not offer, so it travels as
+        // free text rather than as a selection.
+        return deliver(provider + "::" + model, true);
+      };
+
+      const q = query.trim().toLowerCase();
+      const rows = [];
+      // The store's groups are the harness's `ModelProviderGroup`: `{ id, name,
+      // models }`. The seat renders from its OWN `{ g, models }` wrapper, and
+      // reading `group.g` here skipped every group — which is why the dialog first
+      // came up empty while the chat seat listed 859 models.
+      const groups = Array.isArray(state.groups) ? state.groups : [];
+      const view = [];
+      for (const group of groups) {
+        if (!group || typeof group.id !== "string" || !Array.isArray(group.models)) continue;
+        const providerId = group.id;
+        if (isHiddenProvider(providerId)) continue;
+        const visible = [];
+        for (const model of group.models) {
+          if (!model || isHiddenModel(providerId, model.id)) continue;
+          if (favOnly && !hasFav(providerId, model.id)) continue;
+          if (q !== "") {
+            const hay = ((model.name || model.id) + " " + model.id + " " + (group.name || providerId)).toLowerCase();
+            if (hay.indexOf(q) === -1) continue;
+          }
+          visible.push(model);
+          rows.push({ g: group, m: model });
+        }
+        // A view of our own instead of mutating the store's objects: the snapshot
+        // belongs to the harness, and a filtered list is ours.
+        if (visible.length > 0) view.push({ g: group, visible });
+      }
+      const sorted = sort === null ? null : rows.slice().sort((a, b) => {
+        const value = (row) => {
+          if (sort.key === "name") return (row.m.name || row.m.id).toLowerCase();
+          if (sort.key === "provider") return String(row.g.name || row.g.id).toLowerCase();
+          if (sort.key === "price") return priceSortValue(row.g.id, row.m.id);
+          return contextSortValue(row.g.id, row.m.id);
+        };
+        const left = value(a);
+        const right = value(b);
+        if (left === right) return 0;
+        return (left < right ? -1 : 1) * sort.dir;
+      });
+
+      /** Column header that cycles ascending → descending → grouped. */
+      const sortHeader = (key, text, title) => React.createElement("button", {
+        type: "button",
+        className: "mg-sort",
+        onClick: () => setSort((current) => current === null || current.key !== key
+          ? { key, dir: 1 }
+          : (current.dir === 1 ? { key, dir: -1 } : null)),
+        title,
+      }, text, sort !== null && sort.key === key ? (sort.dir === 1 ? " ▲" : " ▼") : "");
+
+      const renderRow = (g, m) => {
+        const isInherited = inherited !== null && inherited.provider === g.id && inherited.model === m.id;
+        const fav = hasFav(g.id, m.id);
+        const entry = priceFor(g.id, m.id);
+        const priceText = entry ? formatPrice(entry) : (subscriptionFor(g.id, m.id) ? "sub" : "");
+        const window_ = contextFor(g.id, m.id);
+        return React.createElement("button", {
+          type: "button",
+          key: "m:" + g.id + ":" + m.id,
+          className: "mg-model",
+          role: "option",
+          "aria-selected": isInherited,
+          disabled: busy !== null,
+          title: isInherited ? "This is the route the child would inherit" : "Send this delegation to " + g.id + "::" + m.id,
+          onClick: () => pick(g.id, m.id),
+        },
+          React.createElement("span", { className: "mg-check" }, isInherited ? "✓" : ""),
+          React.createElement("span", { className: "mg-name" }, m.name || m.id),
+          React.createElement("span", { className: "mg-ctx" }, window_ === null ? "" : formatTokens(window_)),
+          React.createElement("span", { className: "mg-price" }, priceText),
+          React.createElement("span", {
+            className: "mg-star" + (fav ? " on" : ""),
+            role: "button",
+            "aria-label": fav ? "Remove favorite" : "Add to favorites",
+            title: fav ? "Remove favorite" : "Add to favorites",
+            onClick: (e) => { e.stopPropagation(); toggleFav(g.id, m.id); setTick((t) => t + 1); },
+          }, fav ? "★" : "☆"),
+          // Same last cell as the seat's row: hiding is the shared list, and the
+          // seat's settings panel is where it is restored.
+          React.createElement("span", {
+            className: "mg-hide",
+            role: "button",
+            "aria-label": "Hide " + (m.name || m.id) + " from the list",
+            title: "Hide this model from the list (manage hidden in the seat's ⚙ panel)",
+            onClick: (e) => { e.stopPropagation(); toggleHiddenModel(g.id, m.id); setTick((t) => t + 1); },
+          }, "✕")
+        );
+      };
+
+      const body = [];
+      if (sorted !== null) {
+        for (const row of sorted) body.push(renderRow(row.g, row.m));
+      } else {
+        // The router's own quick choices first: they are deployment configuration,
+        // and they stay one click away however long the catalog is.
+        const visibleQuick = quick.filter(option => q === "" || option.label.toLowerCase().indexOf(q) !== -1);
+        if (visibleQuick.length > 0) {
+          body.push(React.createElement("div", { key: "quick", className: "mg-group" },
+            React.createElement("div", { className: "mg-grouphead" },
+              React.createElement("span", null, "Quick choices"),
+              React.createElement("span", { className: "mg-badge" }, String(visibleQuick.length))
+            ),
+            React.createElement("div", { className: "mg-groupbody" },
+              visibleQuick.map(option => React.createElement("button", {
+                type: "button",
+                key: "quick:" + option.label,
+                className: "mg-model",
+                disabled: busy !== null,
+                title: option.description === undefined
+                  ? "Send this delegation to the lane " + option.label
+                  : option.label + " — " + option.description,
+                onClick: () => deliver(option.label),
+              },
+                React.createElement("span", { className: "mg-check" }, ""),
+                React.createElement("span", { className: "mg-name" },
+                  option.label,
+                  option.description === undefined
+                    ? null
+                    : React.createElement("span", { className: "mg-prov" }, " · " + option.description)
+                ),
+                React.createElement("span", { className: "mg-ctx" }, ""),
+                React.createElement("span", { className: "mg-price" }, ""),
+                React.createElement("span", { className: "mg-star" }, ""),
+                React.createElement("span", { className: "mg-hide" }, "")
+              ))
+            )
+          ));
+        }
+        for (const entry of view) {
+          const closed = isCollapsed(entry.g.id);
+          body.push(React.createElement("div", { key: "g:" + entry.g.id, className: "mg-group" },
+            React.createElement("button", {
+              type: "button",
+              className: "mg-grouphead" + (closed ? " closed" : ""),
+              onClick: () => { toggleCollapsed(entry.g.id); setTick((t) => t + 1); },
+              title: closed ? "Expand provider" : "Collapse provider",
+              "aria-expanded": !closed,
+            },
+              React.createElement("span", { className: "mg-caret" }, "▼"),
+              React.createElement("span", null, entry.g.name || entry.g.id),
+              React.createElement("span", { className: "mg-badge" }, String(entry.visible.length))
+            ),
+            !closed && React.createElement("div", { className: "mg-groupbody" },
+              entry.visible.map((model) => renderRow(entry.g, model))
+            )
+          ));
+        }
+      }
+
+      const failures = Array.isArray(state.failures) ? state.failures : [];
+      const loading = state.status === "loading" || state.status === "idle";
+      // What the snapshot holds BEFORE any filter. An empty catalog and a filter
+      // that matched nothing are different situations: the first one still has the
+      // router's own choices to offer, and rendering "No matching models" instead
+      // would throw those away — which is exactly what an empty list did here.
+      let snapshotModels = 0;
+      for (const group of groups) {
+        // Same field names as the loop above: this count decides the status line
+        // and the empty-list wording, so reading the wrong field here announced an
+        // empty catalog while the list below it rendered fine.
+        if (group && typeof group.id === "string" && Array.isArray(group.models)) snapshotModels += group.models.length;
+      }
+      const catalogMissing = snapshotModels === 0 && !loading;
+      // The directory store reports its own failure; showing it is the difference
+      // between "no models configured" and "the load failed".
+      const storeError = typeof state.error === "string" && state.error !== "" ? state.error : null;
+      const listNode = loading && rows.length === 0
+        ? React.createElement("div", { className: "mg-empty" }, "loading models…")
+        : (rows.length === 0 && body.length === 0
+          ? React.createElement("div", { className: "mg-empty" },
+            catalogMissing ? "No model list in this session — use the choices below" : "No matching models")
+          : body)
+
+      return React.createElement("div", { className: "mg-qanswer" },
+        React.createElement("div", { className: "mg-qhead" },
+          React.createElement("span", { className: "mg-qtitle" }, question.question || "Which model should run this delegation?"),
+          React.createElement("span", {
+            className: "mg-qclose",
+            role: "button",
+            "aria-label": "Dismiss the question",
+            title: "Dismiss: the delegation then keeps the route it would have inherited",
+            onClick: dismiss,
+          }, "✕")
+        ),
+        typeof question.detail === "string" && question.detail !== ""
+          ? React.createElement("div", { className: "mg-qdetail", style: { whiteSpace: "pre-line" } }, question.detail)
+          : null,
+        React.createElement("div", { className: "mg-search" },
+          React.createElement("input", {
+            value: query,
+            placeholder: "Search models…",
+            "aria-label": "Search models",
+            onChange: (e) => setQuery(e.target.value),
+            autoFocus: true,
+          }),
+          React.createElement("button", {
+            type: "button",
+            className: "mg-local" + (favOnly ? " on" : ""),
+            title: "Show favorites only",
+            onClick: () => setFavOnly((value) => !value),
+          }, "★"),
+          sortHeader("name", "Name", "Sort by model name (asc → desc → grouped)"),
+          sortHeader("provider", "Provider", "Sort by provider (asc → desc → grouped)"),
+          sortHeader("ctx", "Ctx", "Sort by context window (asc → desc → grouped)"),
+          sortHeader("price", "Price", "Sort by input price (asc → desc → grouped)")
+        ),
+        React.createElement("div", { className: "mg-thead" },
+          React.createElement("span", null, ""),
+          React.createElement("span", null, "Model"),
+          React.createElement("span", null, "Ctx"),
+          React.createElement("span", null, "Price"),
+          React.createElement("span", null, ""),
+          React.createElement("span", null, "")
+        ),
+        React.createElement("div", { className: "mg-groups" }, listNode),
+        React.createElement("div", { className: "mg-status", style: { display: "flex", justifyContent: "space-between" } },
+          React.createElement("span", { className: "mg-count" }, catalogMissing ? "model list unavailable" : rows.length + " models"),
+          React.createElement("span", { className: "mg-count" }, failures.length === 0 ? "" : failures.length + " provider(s) failed to list")
+        ),
+        failure !== null
+          ? React.createElement("div", { className: "mg-qerror" }, failure)
+          : (storeError === null ? null : React.createElement("div", { className: "mg-qerror" }, "model list failed: " + storeError)),
+        React.createElement("div", { className: "mg-qactions" },
+          inherited !== null && inherited.label !== null
+            ? React.createElement("button", {
+              type: "button",
+              className: "mg-qbtn",
+              disabled: busy !== null,
+              onClick: () => deliver(inherited.label),
+              title: inherited.provider === null
+                ? "Run the child on the route it would have inherited"
+                : "Run the child on " + inherited.provider + "::" + inherited.model,
+            }, busy === inherited.label ? "sending…" : "Keep " + (inherited.provider === null ? "the inherited route" : inherited.provider + "::" + inherited.model))
+            : null,
+          auto !== null
+            ? React.createElement("button", {
+              type: "button",
+              className: "mg-qbtn",
+              disabled: busy !== null,
+              onClick: () => deliver(auto.label),
+              title: "Stop asking for the rest of this session; every later delegation uses the router's configured default",
+            }, busy === auto.label ? "sending…" : "Don't ask again this session")
+            : null
+        )
+      );
+    }
+
+    // ---- Plugin body ----
+    function apply(ctx) {
+      ctx.inject(["slots", "modelDirectories"], (scope) => {
+        const slots = scope.slots;
+        const models = scope.modelDirectories;
+        const sessions = scope.sessions;
+        slots.inject("conversation.input.model", () => {
+          return slots.register(
+          {
+            name: "conversation.input.model",
+            priority: -1,
+            inject: (sessionId) => {
+              const available = sessions === undefined || sessions.subagentAddress === undefined
+                ? true
+                : sessions.subagentAddress(sessionId) === undefined;
+              if (models === undefined) {
+                return { sessionId, available: false, directory: null, load: () => {}, select: () => Promise.resolve(false) };
+              }
+              // directoryFor() throws for a session the host cannot resolve
+              // ("session resolved no scope"). A throw inside the inject factory
+              // makes the slot renderer abdicate this entry for good (until a
+              // page reload), so degrade to the unavailable stub instead.
+              let directory = null;
+              try {
+                directory = models.directoryFor(sessionId);
+              } catch {
+                directory = null;
+              }
+              if (!directory) {
+                return { sessionId, available: false, directory: null, load: () => {}, select: () => Promise.resolve(false) };
+              }
+              return {
+                sessionId,
+                available,
+                directory: directory.store,
+                load: () => { if (available) directory.load().catch(() => {}); },
+                select: (selection) => available ? directory.select(selection).then(() => true, () => false) : Promise.resolve(false),
+              };
+            },
+          },
+          function ModelChooserSelect(props) {
+            const store = props.directory;
+            const emptySnapshot = React.useMemo(() => ({
+              current: null,
+              routable: null,
+              groups: [],
+              failures: [],
+              status: "idle",
+              error: null,
+            }), []);
+            const state = React.useSyncExternalStore(
+              React.useCallback((cb) => (store && typeof store.subscribe === "function" ? store.subscribe(cb) : () => {}), [store]),
+              React.useCallback(() => (store && typeof store.getSnapshot === "function" ? store.getSnapshot() : emptySnapshot), [store, emptySnapshot]),
+              () => emptySnapshot
+            );
+
+          // Load models immediately on mount / when available
+          React.useEffect(() => {
+            if (props.available && props.load) {
+              props.load();
+            }
+          }, [props.available]);
+
+          // Auto model-list update: periodically re-load the directory while
+          // the picker is mounted, so newly added/removed providers + models
+          // show up without reopening the panel. Skipped while the tab is
+          // hidden. The store subscription above picks up the fresh snapshot.
+          React.useEffect(() => {
+            if (!(props.available && props.load)) return;
+            const id = globalThis.setInterval(() => {
+              if (globalThis.document && globalThis.document.hidden) return;
+              props.load();
+            }, MODEL_LIST_REFRESH_MS);
+            return () => globalThis.clearInterval(id);
+          }, [props.available, props.load]);
+
+          const [open, setOpen] = React.useState(false);
+          const [query, setQuery] = React.useState("");
+          const [favOnly, setFavOnly] = React.useState(false);
+          // localOnly: only models tagged "Local: yes" (local endpoint)
+          const [localOnly, setLocalOnly] = React.useState(false);
+          // liveOnly: local providers show ONLY models currently live on
+          // their API (configured but stale entries are hidden).
+          const [liveOnly, setLiveOnly] = React.useState(false);
+          // Live gateway inventory: { providers: { "<id>": { models?: string[], error?: string } } }
+          const [serverModels, setServerModels] = React.useState(null);
+          function fetchServerModels() {
+            globalThis.fetch("/model-chooser/server-models")
+              .then(function (r) { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
+              .then(function (d) { setServerModels(d); })
+              .catch(function () { setServerModels(null); });
+          }
+          // Live inventory: fetch when the panel opens and then with every
+          // auto-refresh cycle — cheap local-only probes with 5 s timeout.
+          const fetchServerModelsRef = React.useRef(fetchServerModels);
+          fetchServerModelsRef.current = fetchServerModels;
+          React.useEffect(() => {
+            if (!open) return;
+            fetchServerModelsRef.current();
+            const id = globalThis.setInterval(() => {
+              if (globalThis.document && globalThis.document.hidden) return;
+              fetchServerModelsRef.current();
+            }, MODEL_LIST_REFRESH_MS);
+            return () => globalThis.clearInterval(id);
+          }, [open]);
+
+          // ---- Model-list refresh (picker's ⟳ button) ----
+          // POST /model-chooser/refresh-models re-syncs EVERY configured
+          // provider route from its live API and writes the merged lists back
+          // to the settings document (llm-pi-ai hot-reloads them). Afterwards
+          // the directory + live inventory re-load so the panel reflects the
+          // new lists immediately.
+          const [refreshBusy, setRefreshBusy] = React.useState(false);
+          const [refreshResult, setRefreshResult] = React.useState(null); // { summary, results?, error? }
+          // Hidden-models/providers settings popup (⚙ in the search row).
+          const [hideOpen, setHideOpen] = React.useState(false);
+          function runRefreshModels() {
+            setRefreshBusy(true);
+            setRefreshResult(null);
+            globalThis.fetch("/model-chooser/refresh-models", { method: "POST" })
+              // Read the body as text first: an error response may be empty
+              // (405/404 from a stale host, HTML from an SPA fallback) and
+              // r.json() would only surface a cryptic engine message
+              // ("Unexpected end of JSON input" / "did not match the expected
+              // pattern") instead of telling the user what to do.
+              .then(function (r) {
+                return r.text().then(function (text) {
+                  var d = null;
+                  try { d = JSON.parse(text); } catch { /* non-JSON body */ }
+                  return { ok: r.ok, status: r.status, d: d, text: text };
+                });
+              })
+              .then(function (out) {
+                if (out.ok && out.d) {
+                  setRefreshResult(out.d);
+                } else if (!out.ok && out.d && out.d.error) {
+                  setRefreshResult({ error: out.d.error });
+                } else {
+                  // No usable payload: 405/404 = the host half of this plugin
+                  // is not loaded (model-chooser needs a reload), 503/HTML = a
+                  // service is not ready. Name the fix instead of the engine
+                  // message.
+                  var hint = (out.status === 405 || out.status === 404)
+                    ? "refresh failed: the model-chooser host route is not loaded — reload the dsh plugin (Settings → Plugins → dsh-model-chooser: disable/enable) or restart dsh (HTTP " + out.status + ")"
+                    : "refresh failed (HTTP " + out.status + (out.text ? ": " + out.text.slice(0, 120) : "") + ")";
+                  setRefreshResult({ error: hint });
+                }
+                // directory + live inventory see the freshly written lists
+                if (props.available && props.load) props.load();
+                fetchServerModels();
+              })
+              .catch(function (err) {
+                setRefreshResult({ error: String(err && err.message ? err.message : err) });
+              })
+              .finally(function () { setRefreshBusy(false); });
+          }
+
+          // Table sorting: null = provider-grouped default view,
+          // otherwise flat list sorted by the clicked column.
+          const [sortKey, setSortKey] = React.useState(null); // 'name' | 'price' | null
+          const [sortDir, setSortDir] = React.useState("asc");
+          const [, setUiTick] = React.useState(0);
+          const [tip, setTip] = React.useState(null); // {g, m, left, top} | null
+          // Last model-switch failure. Rendered INSIDE the panel, which stays
+          // open on failure — a rejected select must never look like success.
+          const [selectError, setSelectError] = React.useState(null);
+          // Effort dropdown (styled like the model picker) next to the model
+          // name in the chat composer.
+          const [effortOpen, setEffortOpen] = React.useState(false);
+
+          const locked = props.locked === true || props.available === false;
+          const groups = state === null || state.groups === undefined ? [] : state.groups;
+          const current = state === null || state.current === undefined ? null : state.current;
+          const status = state === null || state.status === undefined ? "idle" : state.status;
+          const err = state === null || state.error === undefined ? null : state.error;
+
+          // Reasoning level a freshly picked model starts with. The adapter's own
+          // default wins: `reasoning.efforts` documents the adapter-preferred
+          // DISPLAY order, so treating its last entry as "the strongest" would
+          // override the adapter's intent (and the cost/latency that comes with
+          // it). Without a declared default the pick omits `reasoningEffort`
+          // entirely and the adapter decides — exactly like the native picker.
+          function startEffort(m) {
+            const r = m && m.reasoning;
+            if (!r) return "";
+            const def = r.defaultEffort;
+            if (def !== undefined && def !== null && def !== "") return String(def);
+            return "";
+          }
+
+          // Reasoning info of the currently selected model. The trigger label
+          // just shows the model name; any effort level is chosen via a
+          // compact dropdown right next to it in the chat composer
+          // (no "(max)" suffix).
+          function findCurrentModel() {
+            if (!current) return null;
+            for (const g of groups) {
+              if (!g || String(g.id) !== String(current.provider)) continue;
+              const gModels = Array.isArray(g.models) ? g.models : [];
+              for (const m of gModels) {
+                if (m && String(m.id) === String(current.model)) return m;
+              }
+            }
+            return null;
+          }
+          const curModelObj = findCurrentModel();
+          const currentEfforts = (curModelObj && curModelObj.reasoning && curModelObj.reasoning.efforts) || [];
+          const currentEffort = (function () {
+            if (current !== null && current.reasoningEffort !== undefined) return String(current.reasoningEffort);
+            // No explicit effort on the selection yet → mirror what picking this
+            // model would send (the adapter's default, else nothing at all).
+            if (curModelObj !== null) return startEffort(curModelObj);
+            return "";
+          })();
+          const currentLabel = current === null ? null : (String(current.model) || null);
+          const q = query.trim().toLowerCase();
+
+          // Live API inventory of local gateways: providerId -> Set(live model ids).
+          // Empty when no gateway data (remote/cloud providers or offline).
+          const liveMap = (function () {
+            const out = {};
+            if (serverModels === null || !serverModels.providers) return out;
+            for (const pid of Object.keys(serverModels.providers)) {
+              const info = serverModels.providers[pid];
+              if (info && Array.isArray(info.models) && info.models.length > 0) {
+                out[String(pid)] = new Set(info.models.map(String));
+              }
+            }
+            return out;
+          })();
+
+          // Filter once (search + favorites + live + hidden), then group or sort.
+          const filtered = [];
+          for (const g of groups) {
+            if (!g || !g.models) continue;
+            if (providerHidden(String(g.id))) continue;
+            // Whole providers can be blacklisted from the ⚙ hidden-settings
+            // popup — the group then vanishes entirely (models stay intact).
+            if (isHiddenProvider(String(g.id))) continue;
+            const live = liveMap[String(g.id)];
+            for (const m of g.models) {
+              // User-blacklisted model (✕ in its row / hidden-settings).
+              if (isHiddenModel(g.id, m.id)) continue;
+              const text = (m.name || m.id || "") + " " + (m.description || "");
+              if (q !== "" && text.toLowerCase().indexOf(q) === -1) continue;
+              if (favOnly && !hasFav(g.id, m.id)) continue;
+              if (localOnly && !localFor(g.id, m.id)) continue;
+              // "Live" toggle: for providers with live inventory (local
+              // gateways) keep only models the API currently serves.
+              if (liveOnly && live !== undefined && !live.has(String(m.id))) continue;
+              filtered.push({ g, m });
+            }
+          }
+          function entrySortValue(c, field) {
+            if (field === "context") return contextFor(c.g.id, c.m.id);
+            const p = priceFor(c.g.id, c.m.id);
+            return p && typeof p[field] === "number" ? p[field] : null;
+          }
+          if (sortKey !== null) {
+            const dir = sortDir === "asc" ? 1 : -1;
+            filtered.sort(function (a, b) {
+              if (sortKey === "name") {
+                return (String(a.m.name || a.m.id)).localeCompare(String(b.m.name || b.m.id)) * dir;
+              }
+              // price/context: models without a known value sink to the bottom
+              const field = sortKey === "price" ? "input" : "context";
+              const va = entrySortValue(a, field);
+              const vb = entrySortValue(b, field);
+              if (va === null && vb === null) return 0;
+              if (va === null) return 1;
+              if (vb === null) return -1;
+              return (va - vb) * dir;
+            });
+          }
+          const grouped = [];
+          if (sortKey === null) {
+            let last = null;
+            for (const c of filtered) {
+              if (last === null || last.g !== c.g) {
+                last = { g: c.g, models: [] };
+                grouped.push(last);
+              }
+              last.models.push(c.m);
+            }
+          }
+
+          React.useEffect(() => {
+            if (!open && !effortOpen) return;
+            function onKey(e) {
+              if (e.key !== "Escape") return;
+              if (hideOpen) setHideOpen(false);
+              else if (effortOpen) setEffortOpen(false);
+              else { setOpen(false); setTip(null); }
+            }
+            const d = globalThis.document;
+            d.addEventListener("keydown", onKey);
+            return () => d.removeEventListener("keydown", onKey);
+            // eslint-disable-next-line react-hooks/exhaustive-deps
+          }, [open, effortOpen, hideOpen]);
+
+          // Refresh the advisory directory + prices + host catalog on open.
+          React.useEffect(() => {
+            if (!open) return;
+            if (props.load) props.load();
+            fetchPrices().then(() => setUiTick((t) => t + 1));
+            fetchCatalog().then(() => setUiTick((t) => t + 1));
+            // eslint-disable-next-line react-hooks/exhaustive-deps
+          }, [open]);
+
+          // ---- Live per-task cost + session breakdown ----
+          // One poll against /model-chooser/cost-history serves both: it
+          // returns per-model aggregates AND recent timestamped steps. The
+          // cost line sums each model's usage × its OWN (reference) price —
+          // properly attributed instead of pricing the whole session at the
+          // current model's rate. Hovering the line opens the breakdown
+          // popup from the same data (no extra fetch). The host attributes
+          // every step to the model in effect via the session log's
+          // request/context events — nothing extra is stored.
+          const [hist, setHist] = React.useState(null);
+          const [histErr, setHistErr] = React.useState(false);
+          const [histOpen, setHistOpen] = React.useState(false);
+          const [histRect, setHistRect] = React.useState(null);
+          const [panelRect, setPanelRect] = React.useState(null);
+          const [copied, setCopied] = React.useState(false);
+          // Column sorting (click header): asc → desc → off, like the panel.
+          const [stepSort, setStepSort] = React.useState(null); // {key, dir} | null
+          const [modelSort, setModelSort] = React.useState(null);
+          const sessionId = props.sessionId;
+          // The breakdown popup is interactive (scrollable, copy button), so
+          // the pointer must be able to travel from the cost line into it.
+          // Closing is delayed briefly; entering either element cancels it.
+          const histCloseTimer = React.useRef(null);
+          // While the popup is open the poll does NOT apply fresh data: new
+          // steps land at the TOP of the list, so live updates would keep
+          // pushing the content down and the user could never scroll to the
+          // top. The view freezes while open and resumes after closing.
+          const histOpenRef = React.useRef(false);
+          function openHist(v) {
+            histOpenRef.current = v;
+            setHistOpen(v);
+          }
+          function scheduleHistClose() {
+            if (histCloseTimer.current !== null) globalThis.clearTimeout(histCloseTimer.current);
+            histCloseTimer.current = globalThis.setTimeout(() => {
+              histCloseTimer.current = null;
+              openHist(false);
+            }, 150);
+          }
+          function cancelHistClose() {
+            if (histCloseTimer.current !== null) {
+              globalThis.clearTimeout(histCloseTimer.current);
+              histCloseTimer.current = null;
+            }
+          }
+          React.useEffect(() => () => { if (histCloseTimer.current !== null) globalThis.clearTimeout(histCloseTimer.current); }, []);
+          // Any panel close (trigger, backdrop, Escape, model pick) must
+          // lift the popup freeze — otherwise polling stays paused forever.
+          React.useEffect(() => {
+            if (!open && histOpenRef.current) openHist(false);
+            // eslint-disable-next-line react-hooks/exhaustive-deps
+          }, [open]);
+          React.useEffect(() => {
+            if (!open || !sessionId) return;
+            let alive = true;
+            const tick = () => {
+              // Skip polling while the tab is hidden; the interval keeps
+              // running but stays cheap, and the next visible tick refreshes.
+              if (globalThis.document && globalThis.document.hidden) return;
+              // While the breakdown popup is open the view must not change:
+              // fresh steps land at the TOP of the list and would chase the
+              // scroll position away from the top the user is heading to.
+              if (histOpenRef.current) return;
+              globalThis.fetch("/model-chooser/cost-history?session=" + encodeURIComponent(String(sessionId)) + "&limit=200")
+                .then(function (r) { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
+                .then(function (d) { if (!alive) return; setHist(d); setHistErr(false); })
+                .catch(function () { if (!alive) return; setHistErr(true); });
+            };
+            tick();
+            const timer = globalThis.setInterval(tick, 1500);
+            return () => { alive = false; globalThis.clearInterval(timer); };
+          }, [open, sessionId]);
+          const costHoverProps = {
+            onMouseEnter: (e) => {
+              cancelHistClose();
+              setHistRect(e.currentTarget.getBoundingClientRect());
+              const panel = e.currentTarget.closest(".mg-panel");
+              setPanelRect(panel ? panel.getBoundingClientRect() : null);
+              openHist(true);
+            },
+            onMouseLeave: () => scheduleHistClose(),
+          };
+
+          function currentCost() {
+            if (!hist || histErr) return null;
+            const models = Array.isArray(hist.models) ? hist.models : [];
+            const totalSteps = typeof hist.totalSteps === "number" ? hist.totalSteps : 0;
+            if (totalSteps === 0) return null;
+            let total = 0;
+            let anyPriced = false;
+            let inT = 0, outT = 0, crT = 0, cwT = 0;
+            for (const m of models) {
+              inT += m.inputTokens || 0;
+              outT += m.outputTokens || 0;
+              crT += m.cacheReadTokens || 0;
+              cwT += m.cacheWriteTokens || 0;
+              const est = estimateCost(priceFor(m.provider, m.model), m);
+              if (est.hasPrice) { anyPriced = true; total += est.total; }
+            }
+            return {
+              total,
+              hasPrice: anyPriced,
+              inputTokens: inT,
+              outputTokens: outT,
+              cacheReadTokens: crT,
+              cacheWriteTokens: cwT,
+              steps: totalSteps,
+            };
+          }
+
+          function toggleOpen() {
+            if (locked) return;
+            setSelectError(null);
+            if (open) { setOpen(false); setHideOpen(false); setTip(null); return; }
+            setOpen(true); setQuery(""); setHideOpen(false); setTip(null); setEffortOpen(false);
+          }
+          // Table-header click: asc → desc → off (back to provider groups).
+          function toggleSort(key) {
+            if (sortKey !== key) { setSortKey(key); setSortDir("asc"); return; }
+            if (sortDir === "asc") { setSortDir("desc"); return; }
+            setSortKey(null);
+          }
+          function pick(g, m) {
+            const sel = { provider: g.id, model: m.id };
+            const eff = startEffort(m);
+            if (eff !== "") sel.reasoningEffort = eff;
+            const done = () => { setSelectError(null); setOpen(false); setTip(null); };
+            if (typeof props.select !== "function") { done(); return; }
+            let out;
+            try {
+              out = props.select(sel);
+            } catch (error) {
+              setSelectError("Could not switch model: " + (error && error.message ? error.message : String(error)));
+              return;
+            }
+            if (!out || typeof out.then !== "function") { done(); return; }
+            // A rejected switch must stay visible: keep the panel open and say
+            // why — the native picker keeps its menu open the same way.
+            out.then(function (ok) {
+              if (ok === false) {
+                setSelectError("Could not switch to " + String(m.id) + " — the host rejected the selection.");
+                return;
+              }
+              done();
+            }, function (error) {
+              setSelectError("Could not switch model: " + (error && error.message ? error.message : String(error)));
+            });
+          }
+          // Effort chosen from the compact dropdown next to the model name
+          // in the chat composer: re-select the current model with that
+          // effort. Opening one picker always closes the other.
+          function pickChatEffort(value) {
+            if (current === null || typeof props.select !== "function") return;
+            props
+              .select({ provider: current.provider, model: current.model, reasoningEffort: value })
+              .then(function () { setUiTick((t) => t + 1); }, function () {});
+          }
+          // Tooltip opens BESIDE the panel, its RIGHT edge always flush
+          // against the panel's LEFT edge (anchored via style.right, so any
+          // tooltip width snaps to the same seam). Never flips over the chat
+          // text: when space left of the panel is tight the tooltip SHRINKS
+          // (maxWidth = available room) instead of switching sides. The
+          // right-edge fallback only fires when there is essentially no
+          // room left of the panel at all (< 180px).
+          function showTip(e, g, m) {
+            const row = e.currentTarget;
+            const r = row.getBoundingClientRect();
+            const panel = row.closest(".mg-panel");
+            const pr = panel ? panel.getBoundingClientRect() : r;
+            const vw = typeof window === "undefined" ? 1200 : window.innerWidth;
+            const vh = typeof window === "undefined" ? 800 : window.innerHeight;
+            const top = Math.max(8, Math.min(r.top - 4, vh - 220));
+            const roomLeft = pr.left - 8; // keep an 8px viewport margin
+            const side = roomLeft >= 180 ? "left" : "right";
+            const maxW = side === "left" ? Math.min(320, Math.floor(roomLeft)) : 320;
+            setTip({ g, m, panelLeft: pr.left, panelRight: pr.right, side, top, maxW });
+          }
+          function hideTip() {
+            setTip(null);
+          }
+
+          function sortIndicator(key) {
+            if (sortKey !== key) return null;
+            return React.createElement("span", { className: "mg-ind" }, sortDir === "asc" ? "▲" : "▼");
+          }
+          function renderRow(g, m, showProvider) {
+            const isCurrent = current !== null && g.id === current.provider && m.id === current.model;
+            const fav = hasFav(g.id, m.id);
+            const entry = priceFor(g.id, m.id);
+            const ptxt = entry ? formatPrice(entry)
+              : (subscriptionFor(g.id, m.id) ? "sub" : "");
+            const cw = contextFor(g.id, m.id);
+            const ctxt = cw === null ? "" : formatTokens(cw);
+            return React.createElement("button", {
+              type: "button",
+              key: "m:" + g.id + ":" + m.id,
+              className: "mg-model",
+              role: "option",
+              "aria-selected": isCurrent,
+              onClick: () => pick(g, m),
+              onMouseEnter: (e) => showTip(e, g, m),
+              onMouseLeave: hideTip,
+            },
+              React.createElement("span", { className: "mg-check" }, isCurrent ? "✓" : ""),
+              React.createElement("span", { className: "mg-name" },
+                m.name || m.id,
+                showProvider && React.createElement("span", { className: "mg-prov" }, " · " + (g.name || g.id))
+              ),
+              React.createElement("span", { className: "mg-ctx" }, ctxt),
+              React.createElement("span", { className: "mg-price" }, ptxt),
+              React.createElement("span", {
+                className: "mg-star" + (fav ? " on" : ""),
+                role: "button",
+                "aria-label": fav ? "Remove favorite" : "Add to favorites",
+                title: fav ? "Remove favorite" : "Add to favorites",
+                onClick: (e) => { e.stopPropagation(); toggleFav(g.id, m.id); setUiTick((t) => t + 1); },
+              }, fav ? "★" : "☆"),
+              React.createElement("span", {
+                className: "mg-hide",
+                role: "button",
+                "aria-label": "Hide " + (m.name || m.id) + " from the list",
+                title: "Hide this model from the list (manage hidden in ⚙)",
+                onClick: (e) => { e.stopPropagation(); toggleHiddenModel(g.id, m.id); setUiTick((t) => t + 1); },
+              }, "✕")
+            );
+          }
+
+          return React.createElement("div", { className: "mg-outer" + (open ? " open" : "") },
+            React.createElement("div", { className: "mg-trigger-row" },
+              React.createElement("button", {
+                type: "button",
+                className: "mg-trigger" + (locked ? " locked" : ""),
+                title: currentLabel === null ? "Select model" : "Model: " + currentLabel,
+                onClick: toggleOpen,
+                disabled: locked,
+                "aria-haspopup": "listbox",
+                "aria-expanded": open,
+              },
+                React.createElement("span", { className: "mg-label" }, (currentLabel === null ? "Select model" : currentLabel)),
+                React.createElement("span", { className: "mg-chev" }, "▾")
+              ),
+              // Reasoning-effort picker right next to the model name — same
+              // trigger style and floating menu design as the model picker.
+              !locked && currentEfforts.length > 0 && React.createElement("div", {
+                className: "mg-effort-outer",
+              },
+                React.createElement("button", {
+                  type: "button",
+                  className: "mg-trigger mg-effort-trigger",
+                  title: "Reasoning effort: " + currentEffort,
+                  // Opening one picker always closes the other.
+                  onClick: () => { setOpen(false); setTip(null); setEffortOpen(!effortOpen); },
+                  "aria-haspopup": "listbox",
+                  "aria-expanded": effortOpen,
+                },
+                  React.createElement("span", { className: "mg-label mg-effort-label" },
+                    currentEffort === "" ? "effort" : currentEffort),
+                  React.createElement("span", { className: "mg-chev" }, "▾")
+                ),
+                effortOpen && React.createElement("button", {
+                  type: "button",
+                  className: "mg-backdrop",
+                  "aria-label": "Close effort picker",
+                  onClick: () => setEffortOpen(false),
+                }),
+                effortOpen && React.createElement("div", { className: "mg-effort-menu", role: "listbox" },
+                  currentEfforts.map((ef) => {
+                    const v = String(ef.id !== undefined && ef.id !== null ? ef.id : ef.name);
+                    const active = v === currentEffort;
+                    return React.createElement("button", {
+                      type: "button",
+                      key: v,
+                      className: "mg-effort-item" + (active ? " active" : ""),
+                      role: "option",
+                      "aria-selected": active,
+                      onClick: () => { pickChatEffort(v); setEffortOpen(false); },
+                    },
+                      React.createElement("span", { className: "mg-effort-item-name" }, ef.name || ef.id),
+                      active && React.createElement("span", { className: "mg-effort-item-check" }, "✓")
+                    );
+                  })
+                )
+              )
+            ),
+            open && !locked && React.createElement("button", {
+              type: "button",
+              className: "mg-backdrop",
+              "aria-label": "Close model picker",
+              onClick: () => { setOpen(false); setTip(null); },
+            }),
+            open && !locked && React.createElement("div", { className: "mg-panel", role: "listbox" },
+              React.createElement("div", { className: "mg-search" },
+                React.createElement("input", {
+                  type: "text",
+                  placeholder: "Search models…",
+                  "aria-label": "Search models",
+                  value: query,
+                  autoFocus: true,
+                  onChange: (e) => setQuery(e.target.value),
+                }),
+                React.createElement("button", {
+                  type: "button",
+                  className: "mg-local" + (localOnly ? " on" : ""),
+                  onClick: () => setLocalOnly(!localOnly),
+                  "aria-pressed": localOnly,
+                  title: localOnly ? "Show all models" : "Show only local models (Local: yes, no API price)",
+                }, "Local"),
+                React.createElement("button", {
+                  type: "button",
+                  className: "mg-local" + (liveOnly ? " on" : ""),
+                  onClick: () => setLiveOnly(!liveOnly),
+                  "aria-pressed": liveOnly,
+                  title: liveOnly
+                    ? "Show configured + live models"
+                    : "Local providers: show only models their API currently serves",
+                }, "Live"),
+                React.createElement("button", {
+                  type: "button",
+                  className: "mg-local mg-refresh" + (refreshBusy ? " on" : ""),
+                  onClick: () => { if (!refreshBusy) runRefreshModels(); },
+                  disabled: refreshBusy,
+                  title: "Refresh every provider model list from its live API (writes back to the llm-pi-ai configuration)",
+                }, refreshBusy ? "⟳ …" : "⟳"),
+                React.createElement("button", {
+                  type: "button",
+                  className: "mg-local" + (hideOpen ? " on" : ""),
+                  onClick: () => setHideOpen(!hideOpen),
+                  "aria-pressed": hideOpen,
+                  title: "Manage hidden models and providers (shrink the list)",
+                }, "⚙")
+              ),
+              // Hidden-settings popup: every blacklisted provider and model
+              // with a per-row "show" link + a "show all" reset. Overlays the
+              // table (absolute inside the panel), so the table stays intact.
+              hideOpen && (function () {
+                const hidden = readHidden();
+                const provNames = {};
+                for (const g of groups) provNames[String(g.id)] = g.name || String(g.id);
+                // Provider rows: id -> display name.
+                const provRows = hidden.providers.map(function (pid) {
+                  return React.createElement("div", { key: "hp:" + pid, className: "mg-hideitem" },
+                    React.createElement("span", { className: "mg-hideitem-prov" }, "provider"),
+                    React.createElement("span", { className: "mg-hideitem-name" }, provNames[pid] || pid),
+                    React.createElement("button", {
+                      type: "button",
+                      className: "mg-hideitem-show",
+                      onClick: () => { toggleHiddenProvider(pid); setUiTick((t) => t + 1); },
+                      title: "Show this provider again",
+                    }, "show")
+                  );
+                });
+                // Model rows: "provider::model" -> split back for display.
+                const modelRows = hidden.models.map(function (key) {
+                  const sep = key.indexOf("::");
+                  const pid = sep === -1 ? "" : key.slice(0, sep);
+                  const mid = sep === -1 ? key : key.slice(sep + 2);
+                  return React.createElement("div", { key: "hm:" + key, className: "mg-hideitem" },
+                    React.createElement("span", { className: "mg-hideitem-prov" }, provNames[pid] || pid),
+                    React.createElement("span", { className: "mg-hideitem-name" }, mid),
+                    React.createElement("button", {
+                      type: "button",
+                      className: "mg-hideitem-show",
+                      onClick: () => { toggleHiddenModel(pid, mid); setUiTick((t) => t + 1); },
+                      title: "Show this model again",
+                    }, "show")
+                  );
+                });
+                return React.createElement("div", { className: "mg-hidepanel", role: "dialog", "aria-label": "Hidden models and providers" },
+                  React.createElement("div", { className: "mg-hidepanel-title" },
+                    React.createElement("span", null, "Hidden from list"),
+                    React.createElement("button", {
+                      type: "button",
+                      className: "mg-hidepanel-clear",
+                      onClick: () => { clearHidden(); setUiTick((t) => t + 1); },
+                      title: "Un-hide every model and provider",
+                    }, "show all")
+                  ),
+                  React.createElement("div", { className: "mg-hidepanel-scroll" },
+                    React.createElement("div", { className: "mg-hidepanel-sect" }, "Providers"),
+                    provRows.length > 0 ? provRows : React.createElement("div", { className: "mg-hidepanel-empty" }, "none hidden"),
+                    React.createElement("div", { className: "mg-hidepanel-sect" }, "Models"),
+                    modelRows.length > 0 ? modelRows : React.createElement("div", { className: "mg-hidepanel-empty" }, "none hidden")
+                  )
+                );
+              })(),
+              React.createElement("div", { className: "mg-thead" },
+                React.createElement("span", null, ""),
+                React.createElement("button", {
+                  type: "button",
+                  className: "mg-th" + (sortKey === "name" ? " active" : ""),
+                  onClick: () => toggleSort("name"),
+                  title: "Sort by name (click again to reverse, third click: provider groups)",
+                }, "Name", sortIndicator("name")),
+                React.createElement("button", {
+                  type: "button",
+                  className: "mg-th ctx" + (sortKey === "context" ? " active" : ""),
+                  onClick: () => toggleSort("context"),
+                  title: "Sort by context window (click again to reverse, third click: provider groups)",
+                }, "Ctx", sortIndicator("context")),
+                React.createElement("button", {
+                  type: "button",
+                  className: "mg-th price" + (sortKey === "price" ? " active" : ""),
+                  onClick: () => toggleSort("price"),
+                  title: "Sort by price per 1M input tokens (click again to reverse, third click: provider groups)",
+                }, "Price", sortIndicator("price")),
+                React.createElement("button", {
+                  type: "button",
+                  className: "mg-th star" + (favOnly ? " active" : ""),
+                  onClick: () => setFavOnly(!favOnly),
+                  "aria-pressed": favOnly,
+                  title: favOnly ? "Show all models" : "Show favorites only",
+                }, favOnly ? "★" : "☆")
+              ),
+              status === "loading" && React.createElement("div", { className: "mg-status" }, "Loading…"),
+              err && React.createElement("div", { className: "mg-error" }, err),
+              selectError && React.createElement("div", { className: "mg-error" }, selectError),
+              (function () {
+                const cc = currentCost();
+                if (!cc || histErr) {
+                  return histErr
+                    ? React.createElement("div", { className: "mg-status" }, "cost endpoint unavailable")
+                    : null;
+                }
+                const label = !current
+                  ? "no model selected"
+                  : (current.model || current.provider || "model");
+                // Token usage is ALWAYS shown once the session has traffic;
+                // the cost figure depends on a (reference) price being known.
+                const detail = formatTokens(cc.inputTokens) + " in / " + formatTokens(cc.outputTokens) + " out" +
+                  ((cc.cacheReadTokens + cc.cacheWriteTokens) > 0
+                    ? " · " + formatTokens(cc.cacheReadTokens + cc.cacheWriteTokens) + " cache"
+                    : "");
+                if (!cc.hasPrice) {
+                  // No model used in this session has a (reference) price.
+                  const usedModels = (hist && Array.isArray(hist.models)) ? hist.models : [];
+                  const allLocal = usedModels.length > 0 && usedModels.every((m) => localFor(m.provider, m.model));
+                  const anySub = usedModels.some((m) => subscriptionFor(m.provider, m.model));
+                  const note = allLocal
+                    ? "local models → no API cost"
+                    : (anySub ? "subscription → no per-token price" : "no price data");
+                  return React.createElement("div", { className: "mg-cost" },
+                    React.createElement("span", null, note,
+                      React.createElement("span", { className: "mg-cost-detail" }, " · " + detail + " · " + label)
+                    )
+                  );
+                }
+                const line = "approx cost: " + formatMoney(cc.total);
+                // The breakdown popup opens ONLY when hovering the cost
+                // figure itself — not the token detail or model label.
+                return React.createElement("div", { className: "mg-cost" },
+                  React.createElement("span", null,
+                    React.createElement("span",
+                      Object.assign({ className: "mg-costbtn", title: "Hover: session cost breakdown" }, costHoverProps),
+                      line),
+                    React.createElement("span", { className: "mg-cost-detail" }, " · " + detail + " · " + label)
+                  )
+                );
+              })(),
+              filtered.length === 0 && !(status === "loading") && React.createElement("div", { className: "mg-empty" },
+                groups.length === 0 ? "No models available"
+                  : favOnly ? "No favorites yet — star a model"
+                  : localOnly ? "No local models (all models have an API price)"
+                  : (q === "" && hiddenCount() > 0 ? "All visible models hidden — open ⚙ to restore" : "No matching models")),
+              React.createElement("div", { className: "mg-groups" },
+                sortKey !== null
+                  // flat table view while a column sort is active
+                  ? filtered.map((c) => renderRow(c.g, c.m, true))
+                  : grouped.map(function (grp) {
+                    const closed = isCollapsed(grp.g.id);
+                    return React.createElement("div", { key: "g:" + grp.g.id, className: "mg-group" },
+                      React.createElement("button", {
+                        type: "button",
+                        className: "mg-grouphead" + (closed ? " closed" : ""),
+                        onClick: () => { toggleCollapsed(grp.g.id); setUiTick((t) => t + 1); },
+                        title: closed ? "Expand provider" : "Collapse provider",
+                        "aria-expanded": !closed,
+                      },
+                        React.createElement("span", { className: "mg-caret" }, "▼"),
+                        React.createElement("span", null, grp.g.name || grp.g.id),
+                        React.createElement("span", { className: "mg-badge" }, String(grp.models.length)),
+                        React.createElement("span", {
+                          className: "mg-hide",
+                          role: "button",
+                          "aria-label": "Hide provider " + (grp.g.name || grp.g.id) + " entirely",
+                          title: "Hide this whole provider (manage hidden in ⚙)",
+                          onClick: (e) => { e.stopPropagation(); toggleHiddenProvider(grp.g.id); setUiTick((t) => t + 1); },
+                        }, "✕")
+                      ),
+                      !closed && React.createElement("div", { className: "mg-groupbody" },
+                        grp.models.map((m) => renderRow(grp.g, m, false))
+                      )
+                    );
+                  })
+              ),
+              React.createElement("div", { className: "mg-status", style: { display: "flex", justifyContent: "space-between" } },
+                React.createElement("span", { className: "mg-count" }, filtered.length + " models"),
+                React.createElement("span", {
+                  className: "mg-count",
+                  style: refreshResult && refreshResult.error ? { color: "var(--dsw-alias-state-warn-label, #d29922)" } : undefined,
+                  title: refreshResult && Array.isArray(refreshResult.results)
+                    ? refreshResult.results.map(function (r) {
+                        return r.id + ": " + r.total + " models" +
+                          (r.added > 0 ? " +" + r.added : "") +
+                          (r.removed > 0 ? " −" + r.removed : "") +
+                          (r.error ? " — " + r.error : "");
+                      }).join("\n")
+                    : undefined,
+                }, refreshResult
+                  ? (refreshResult.error ? "⟳ " + refreshResult.error : "⟳ " + refreshResult.summary)
+                  : "prices: models.dev")
+              )
+            ),
+            (function () {
+              if (!tip || locked || !open) return null;
+              const vw = typeof window === "undefined" ? 1200 : window.innerWidth;
+              // left-anchored: right edge flush against the panel's left edge
+              // (1px seam); maxWidth/minWidth shrink the tooltip to the room
+              // available left of the panel instead of flipping sides.
+              const tipStyle = tip.side === "left"
+                ? { right: Math.max(1, vw - tip.panelLeft + 1), top: tip.top,
+                    maxWidth: tip.maxW, minWidth: Math.min(200, tip.maxW) }
+                : { left: Math.min(tip.panelRight + 1, Math.max(8, vw - 340)), top: tip.top,
+                    maxWidth: tip.maxW };
+              const tipEl = React.createElement("div", {
+                className: "mg-tooltip",
+                style: tipStyle,
+              },
+                React.createElement("div", { className: "mg-tt-name" }, tip.m.name || tip.m.id),
+                React.createElement("div", { className: "mg-tt-prov" }, tip.g.name || tip.g.id),
+                tip.m.id !== tip.m.name && React.createElement("div", { className: "mg-tt-id" }, tip.m.id),
+                tip.m.description && React.createElement("div", { className: "mg-tt-desc" }, tip.m.description),
+                (function () {
+                  const entry = priceFor(tip.g.id, tip.m.id);
+                  const ptxt = formatPrice(entry);
+                  const cw = contextFor(tip.g.id, tip.m.id);
+                  const mo = maxOutputFor(tip.g.id, tip.m.id);
+                  const rows = [];
+                  if (ptxt !== "") rows.push(React.createElement("div", { key: "p", className: "mg-tt-row" }, "Price: " + ptxt + " / 1M tokens"));
+                  else if (subscriptionFor(tip.g.id, tip.m.id)) {
+                    rows.push(React.createElement("div", { key: "p", className: "mg-tt-row" }, "Price: subscription plan (no per-token price)"));
+                  }
+                  if (cw !== null) {
+                    rows.push(React.createElement("div", { key: "c", className: "mg-tt-row" },
+                      "Context: " + formatTokens(cw) +
+                      (mo !== null ? " · Max output: " + formatTokens(mo) : "")
+                    ));
+                  }
+                  if (tip.m.reasoning && tip.m.reasoning.efforts && tip.m.reasoning.efforts.length) {
+                    rows.push(React.createElement("div", { key: "r", className: "mg-tt-row" },
+                      "Efforts: " + tip.m.reasoning.efforts.map((ef) => ef.name || ef.id).join(", ")
+                    ));
+                  }
+                  return rows;
+                })(),
+                React.createElement("div", { className: "mg-tt-meta" },
+                  React.createElement("span", null, "Provider: " + tip.g.id),
+                  React.createElement("span", null, "Local: " + (localFor(tip.g.id, tip.m.id) ? "yes" : "no"))
+                )
+              );
+              // Portal to <body>: the composer creates its own stacking
+              // context, so an inline fixed tooltip loses against the chat
+              // history no matter the z-index. Through the portal the
+              // tooltip always floats above everything; it still closes on
+              // mouse-leave / picker close like before.
+              if (ReactDOM && typeof document !== "undefined" && document.body) {
+                return ReactDOM.createPortal(tipEl, document.body);
+              }
+              return tipEl;
+            })(),
+            // ---- Session cost breakdown popup (hover over the cost figure) ----
+            // Sized exactly like the Model Chooser panel and parked parallel
+            // on its LEFT side (1px gap). Interactive — the pointer can
+            // travel into it, scroll the step list (title + model summary
+            // stay pinned) and use the copy button. Pure read of existing
+            // session-log data via /model-chooser/cost-history.
+            (function () {
+              if (!histOpen || !histRect || locked || !open) return null;
+              const anchor = panelRect || histRect;
+              // Same size as the Model Chooser panel itself (width
+              // min(440px,100vw-32px), height = the panel's live height),
+              // parked parallel on its LEFT side with an 8px gap. Only when
+              // the room left of the panel runs out does the width shrink.
+              function popPos() {
+                const vh = typeof window === "undefined" ? 800 : window.innerHeight;
+                const vw = typeof window === "undefined" ? 1200 : window.innerWidth;
+                const gap = 1;
+                const roomLeft = anchor.left - gap - 8; // viewport margin
+                const w = Math.min(
+                  panelRect ? panelRect.width : Math.min(440, vw - 32),
+                  Math.max(240, Math.floor(roomLeft)));
+                const h = panelRect ? panelRect.height : Math.min(480, vh - 96);
+                return {
+                  right: Math.max(1, vw - anchor.left + gap),
+                  top: Math.max(8, anchor.top),
+                  width: w,
+                  height: Math.min(h, vh - 16),
+                };
+              }
+              function portalOrInline(el) {
+                if (ReactDOM && typeof document !== "undefined" && document.body) {
+                  return ReactDOM.createPortal(el, document.body);
+                }
+                return el;
+              }
+              const popHover = { onMouseEnter: cancelHistClose, onMouseLeave: scheduleHistClose };
+              if (histErr) {
+                return portalOrInline(React.createElement("div", Object.assign({ className: "mg-costpop", style: popPos() }, popHover),
+                  React.createElement("div", { className: "mg-costpop-title" }, "Session breakdown"),
+                  React.createElement("div", { className: "mg-costpop-step dim" }, "history endpoint unavailable")
+                ));
+              }
+              if (!hist) {
+                return portalOrInline(React.createElement("div", Object.assign({ className: "mg-costpop", style: popPos() }, popHover),
+                  React.createElement("div", { className: "mg-costpop-title" }, "Session breakdown"),
+                  React.createElement("div", { className: "mg-costpop-step dim" }, "Loading…")
+                ));
+              }
+              const models = Array.isArray(hist.models) ? hist.models : [];
+              const steps = Array.isArray(hist.steps) ? hist.steps : [];
+              let totIn = 0, totOut = 0, totCache = 0;
+              for (const m of models) {
+                totIn += m.inputTokens || 0;
+                totOut += m.outputTokens || 0;
+                totCache += (m.cacheReadTokens || 0) + (m.cacheWriteTokens || 0);
+              }
+              function fallbackCopy(text) {
+                try {
+                  const ta = document.createElement("textarea");
+                  ta.value = text;
+                  ta.style.position = "fixed";
+                  ta.style.opacity = "0";
+                  document.body.appendChild(ta);
+                  ta.select();
+                  document.execCommand("copy");
+                  document.body.removeChild(ta);
+                } catch {}
+              }
+              function copyBreakdown() {
+                const lines = [
+                  "Session token usage — " + (typeof hist.totalSteps === "number" ? hist.totalSteps : steps.length) + " steps",
+                  "Total: " + totIn + " in / " + totOut + " out / " + totCache + " cache",
+                ];
+                for (const m of models) {
+                  lines.push(m.provider + "::" + m.model + ": " + m.steps + "x — " +
+                    (m.inputTokens || 0) + " in / " + (m.outputTokens || 0) + " out / " +
+                    ((m.cacheReadTokens || 0) + (m.cacheWriteTokens || 0)) + " cache");
+                }
+                const text = lines.join("\n");
+                const done = () => {
+                  setCopied(true);
+                  globalThis.setTimeout(() => setCopied(false), 1500);
+                };
+                const fb = () => { fallbackCopy(text); done(); };
+                if (globalThis.navigator && globalThis.navigator.clipboard && globalThis.navigator.clipboard.writeText) {
+                  globalThis.navigator.clipboard.writeText(text).then(done, fb);
+                } else fb();
+              }
+              // Column sort for the model summary (asc → desc → off).
+              let visibleModels = models;
+              if (modelSort !== null) {
+                const dir = modelSort.dir === "asc" ? 1 : -1;
+                visibleModels = models.slice().sort((a, b) => {
+                  if (modelSort.key === "name") return String(a.model).localeCompare(String(b.model)) * dir;
+                  if (modelSort.key === "steps") return ((a.steps || 0) - (b.steps || 0)) * dir;
+                  if (modelSort.key === "in") return ((a.inputTokens || 0) - (b.inputTokens || 0)) * dir;
+                  if (modelSort.key === "out") return ((a.outputTokens || 0) - (b.outputTokens || 0)) * dir;
+                  if (modelSort.key === "cache") {
+                    const ca = (a.cacheReadTokens || 0) + (a.cacheWriteTokens || 0);
+                    const cb = (b.cacheReadTokens || 0) + (b.cacheWriteTokens || 0);
+                    return (ca - cb) * dir;
+                  }
+                  // cost: unpriced models sink to the bottom
+                  const ea = estimateCost(priceFor(a.provider, a.model), {
+                    inputTokens: a.inputTokens, outputTokens: a.outputTokens,
+                    cacheReadTokens: a.cacheReadTokens, cacheWriteTokens: a.cacheWriteTokens,
+                  });
+                  const eb = estimateCost(priceFor(b.provider, b.model), {
+                    inputTokens: b.inputTokens, outputTokens: b.outputTokens,
+                    cacheReadTokens: b.cacheReadTokens, cacheWriteTokens: b.cacheWriteTokens,
+                  });
+                  return ((ea.hasPrice ? ea.total : -1) - (eb.hasPrice ? eb.total : -1)) * dir;
+                });
+              }
+              const modelRows = visibleModels.map((m) => {
+                const price = priceFor(m.provider, m.model);
+                const est = estimateCost(price, {
+                  inputTokens: m.inputTokens, outputTokens: m.outputTokens,
+                  cacheReadTokens: m.cacheReadTokens, cacheWriteTokens: m.cacheWriteTokens,
+                });
+                const cache = (m.cacheReadTokens || 0) + (m.cacheWriteTokens || 0);
+                return React.createElement("div", { key: m.provider + "::" + m.model, className: "mg-costpop-mrow" },
+                  React.createElement("span", { className: "mg-costpop-name" }, m.model),
+                  React.createElement("span", { className: "mg-costpop-num", title: "steps" }, String(m.steps)),
+                  React.createElement("span", { className: "mg-costpop-num" }, formatTokens(m.inputTokens)),
+                  React.createElement("span", { className: "mg-costpop-num" }, formatTokens(m.outputTokens)),
+                  React.createElement("span", { className: "mg-costpop-num" }, formatTokens(cache)),
+                  React.createElement("span", { className: "mg-costpop-num" }, est.hasPrice ? formatMoney(est.total) : "–")
+                );
+              });
+              // Column sort for the step table (asc → desc → off). The CSV export
+              // follows the visible order.
+              let visibleSteps = steps;
+              if (stepSort !== null) {
+                const dir = stepSort.dir === "asc" ? 1 : -1;
+                visibleSteps = steps.slice().sort((a, b) => {
+                  if (stepSort.key === "time") return ((a.time || 0) - (b.time || 0)) * dir;
+                  if (stepSort.key === "model") return String(a.model).localeCompare(String(b.model)) * dir;
+                  if (stepSort.key === "in") return ((a.inputTokens || 0) - (b.inputTokens || 0)) * dir;
+                  if (stepSort.key === "out") return ((a.outputTokens || 0) - (b.outputTokens || 0)) * dir;
+                  const ca = (a.cacheReadTokens || 0) + (a.cacheWriteTokens || 0);
+                  const cb = (b.cacheReadTokens || 0) + (b.cacheWriteTokens || 0);
+                  return (ca - cb) * dir;
+                });
+              }
+              const stepRows = visibleSteps.map((s, i) => {
+                let ts = "";
+                try {
+                  const d = new Date(s.time);
+                  ts = d.toLocaleDateString([], { day: "2-digit", month: "2-digit" }) + " " +
+                       d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+                } catch {}
+                const cache = (s.cacheReadTokens || 0) + (s.cacheWriteTokens || 0);
+                return React.createElement("div", { key: "s" + i, className: "mg-costpop-step" },
+                  React.createElement("span", { className: "mg-costpop-time" }, ts),
+                  React.createElement("span", { className: "mg-costpop-name" }, s.model),
+                  React.createElement("span", { className: "mg-costpop-num" }, formatTokens(s.inputTokens)),
+                  React.createElement("span", { className: "mg-costpop-num" }, formatTokens(s.outputTokens)),
+                  React.createElement("span", { className: "mg-costpop-num" }, formatTokens(cache))
+                );
+              });
+              const totalSteps = typeof hist.totalSteps === "number" ? hist.totalSteps : steps.length;
+              function toggleStepSort(key) {
+                setStepSort(stepSort !== null && stepSort.key === key
+                  ? (stepSort.dir === "asc" ? { key, dir: "desc" } : null)
+                  : { key, dir: "asc" });
+              }
+              function toggleModelSort(key) {
+                setModelSort(modelSort !== null && modelSort.key === key
+                  ? (modelSort.dir === "asc" ? { key, dir: "desc" } : null)
+                  : { key, dir: "asc" });
+              }
+              function sortInd(key, st) {
+                if (st === null || st.key !== key) return null;
+                return React.createElement("span", { className: "mg-ind" }, st.dir === "asc" ? "▲" : "▼");
+              }
+              // CSV export of the currently SORTED step list (BOM
+              // prefix so Excel opens UTF-8 correctly).
+              function exportCsv() {
+                const rows = [["time", "provider", "model", "inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"]];
+                for (const s of visibleSteps) {
+                  const t = typeof s.time === "number" && s.time > 0 ? new Date(s.time).toISOString() : "";
+                  rows.push([t,
+                    String(s.provider === undefined ? "" : s.provider),
+                    String(s.model === undefined ? "" : s.model),
+                    String(s.inputTokens || 0), String(s.outputTokens || 0),
+                    String(s.cacheReadTokens || 0), String(s.cacheWriteTokens || 0)]);
+                }
+                const csv = rows.map((r) =>
+                  r.map((v) => /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v).join(",")
+                ).join("\n");
+                try {
+                  const blob = new globalThis.Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = "model-chooser-tokens-" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".csv";
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
+                  URL.revokeObjectURL(url);
+                } catch {}
+              }
+              const popEl = React.createElement("div", Object.assign({ className: "mg-costpop", style: popPos() }, popHover),
+                React.createElement("div", { className: "mg-costpop-title" },
+                  React.createElement("span", null,
+                    "Session breakdown · " + totalSteps + " steps"),
+                  React.createElement("div", { className: "mg-costpop-btns" },
+                    React.createElement("button", {
+                      type: "button",
+                      className: "mg-costpop-copy",
+                      onClick: copyBreakdown,
+                      title: "Copy token breakdown (in / out / cache)",
+                    }, copied ? "✓ copied" : "copy"),
+                    React.createElement("button", {
+                      type: "button",
+                      className: "mg-costpop-copy",
+                      onClick: exportCsv,
+                      title: "Export the step list as CSV",
+                    }, "export")
+                  )
+                ),
+                models.length > 0 && React.createElement("div", { className: "mg-costpop-models mg-costpop-th" },
+                  React.createElement("button", {
+                    type: "button",
+                    className: "mg-costpop-h",
+                    onClick: () => toggleModelSort("name"),
+                    title: "Sort by model (asc → desc → off)",
+                  }, "Model", sortInd("name", modelSort)),
+                  React.createElement("button", {
+                    type: "button",
+                    className: "mg-costpop-h n",
+                    onClick: () => toggleModelSort("steps"),
+                    title: "Sort by steps (asc → desc → off)",
+                  }, "×", sortInd("steps", modelSort)),
+                  React.createElement("button", {
+                    type: "button",
+                    className: "mg-costpop-h n",
+                    onClick: () => toggleModelSort("in"),
+                    title: "Sort by input tokens (asc → desc → off)",
+                  }, "In", sortInd("in", modelSort)),
+                  React.createElement("button", {
+                    type: "button",
+                    className: "mg-costpop-h n",
+                    onClick: () => toggleModelSort("out"),
+                    title: "Sort by output tokens (asc → desc → off)",
+                  }, "Out", sortInd("out", modelSort)),
+                  React.createElement("button", {
+                    type: "button",
+                    className: "mg-costpop-h n",
+                    onClick: () => toggleModelSort("cache"),
+                    title: "Sort by cache tokens (asc → desc → off)",
+                  }, "Cache", sortInd("cache", modelSort)),
+                  React.createElement("button", {
+                    type: "button",
+                    className: "mg-costpop-h n",
+                    onClick: () => toggleModelSort("cost"),
+                    title: "Sort by ≈ cost (asc → desc → off)",
+                  }, "≈", sortInd("cost", modelSort))
+                ),
+                modelRows,
+                steps.length > 0 && React.createElement("div", { className: "mg-costpop-sep" }),
+                steps.length > 0 && React.createElement("div", { className: "mg-costpop-steps mg-costpop-th" },
+                  React.createElement("button", {
+                    type: "button",
+                    className: "mg-costpop-h",
+                    onClick: () => toggleStepSort("time"),
+                    title: "Sort by time (asc → desc → off)",
+                  }, "Time", sortInd("time", stepSort)),
+                  React.createElement("button", {
+                    type: "button",
+                    className: "mg-costpop-h",
+                    onClick: () => toggleStepSort("model"),
+                    title: "Sort by model (asc → desc → off)",
+                  }, "Model", sortInd("model", stepSort)),
+                  React.createElement("button", {
+                    type: "button",
+                    className: "mg-costpop-h n",
+                    onClick: () => toggleStepSort("in"),
+                    title: "Sort by input tokens (asc → desc → off)",
+                  }, "In", sortInd("in", stepSort)),
+                  React.createElement("button", {
+                    type: "button",
+                    className: "mg-costpop-h n",
+                    onClick: () => toggleStepSort("out"),
+                    title: "Sort by output tokens (asc → desc → off)",
+                  }, "Out", sortInd("out", stepSort)),
+                  React.createElement("button", {
+                    type: "button",
+                    className: "mg-costpop-h n",
+                    onClick: () => toggleStepSort("cache"),
+                    title: "Sort by cache tokens (asc → desc → off)",
+                  }, "Cache", sortInd("cache", stepSort))
+                ),
+                React.createElement("div", { className: "mg-costpop-scroll" },
+                  steps.length === 0
+                    ? React.createElement("div", { className: "mg-costpop-step dim" }, "no usage steps yet")
+                    : stepRows)
+              );
+              return portalOrInline(popEl);
+            })()
+          );
+        }
+      );
+      });
+
+      // The delegation question. Chain position -1 puts it ahead of the stock
+      // question card (priority 0), which keeps every other question: the selector
+      // claims the composer only while a question with the router's id is pending.
+      slots.inject("conversation.composer", () => slots.register(
+        {
+          name: "conversation.composer",
+          priority: -1,
+          select: selectDelegation,
+          inject: (sessionId) => {
+            const available = sessions === undefined || sessions.subagentAddress === undefined
+              ? true
+              : sessions.subagentAddress(sessionId) === undefined;
+            if (models === undefined) {
+              return { sessionId, available: false, directory: null, load: () => {} };
+            }
+            // Same guard as the seat: directoryFor() throws for a session the host
+            // cannot resolve, and a throw inside the inject factory makes the
+            // renderer abdicate this entry for good.
+            let directory = null;
+            try {
+              directory = models.directoryFor(sessionId);
+            } catch {
+              directory = null;
+            }
+            if (!directory) return { sessionId, available: false, directory: null, load: () => {} };
+            return {
+              sessionId,
+              available,
+              directory: directory.store,
+              // Returned so the caller can observe the outcome: a silent no-op here
+              // is what left the delegation dialog with an empty list.
+              load: () => (available ? directory.load() : undefined),
+            };
+          },
+        },
+        DelegationChooser,
+      ));
+      });
+    }
+
+    // `remote`: a cordis service proxy binds `this.ctx` to the CALLING fiber,
+    // so anything modelDirectories reads off its own ctx must be injectable
+    // here too. It reads `sessions`/`connection`/`conversation` via
+    // `ctx.get()` (which bypasses inject), and `remote` only on its OWN fiber
+    // — `remote` stays declared as the cheap guard against a future path that
+    // touches it from the caller's ctx.
+    //
+    // Do NOT add `remote.session` here: no such service exists in the harness
+    // (the Remote namespaces are commands / goals / fileReferences /
+    // pluginInventory / messageFeedback / sessionReferenceResolver /
+    // dynamicCordisRunner). cordis has no optional inject — a name that is
+    // never provided parks this entry in `pending` forever, and dsh-app-boot
+    // fails the WHOLE web boot on an entry that never activates.
+    exports.inject = ["slots", "sessions", "remote"];
+    exports.apply = apply;
+    return module.exports;
+  }
+});

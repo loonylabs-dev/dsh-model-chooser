@@ -1,0 +1,31 @@
+# Automated tests for dsh-model-chooser on every push and pull request.
+#
+# Validates:
+# - The host routes: the live cost aggregation, the catalog, the server-model
+#   inventory, and the settings-writing refresh (with its cross-site rejection)
+# - The refresh arithmetic: discovery, merge, order preservation, the deadline
+# - The browser half: the composer seat's registration and the delegation dialog's
+#   rendered list and answers, loaded through the harness's own module seam with
+#   React stubbed out (no browser, no build step)
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: Node ${{ matrix.node }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Run tests
+        run: npm test
