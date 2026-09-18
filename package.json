@@ -49,7 +49,7 @@
     "docs"
   ],
   "scripts": {
-    "test": "node --test test/cost-endpoint.test.js test/refresh-core.test.js test/refresh-endpoint.test.js test/delegation-chooser.client.test.js",
+    "test": "node --test test/cost-endpoint.test.js test/refresh-core.test.js test/refresh-endpoint.test.js test/delegation-chooser.client.test.js test/panel-placement.client.test.js",
     "prepublishOnly": "npm test"
   },
   "dsh": {

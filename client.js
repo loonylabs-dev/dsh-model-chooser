@@ -44,6 +44,63 @@ window.__ModuleLoader__.load({
     // tooltip portal); if it ever is not, the tooltip falls back to inline.
     let ReactDOM = null;
     try { ReactDOM = require("react-dom"); } catch { ReactDOM = null; }
+    /**
+     * Render a floating element into <body> when the harness provides react-dom.
+     *
+     * Anything anchored in the composer has to leave the composer's subtree to be
+     * safe: the containers that hold it clamp their own overflow (measured in the
+     * game studio 2026-09-19 — DSH's conversation column cuts a 440px panel's left
+     * 86px away while a session is active), and a clip is not a stacking question,
+     * so no z-index can win it.
+     */
+    function portalOrInline(el) {
+      if (ReactDOM && typeof document !== "undefined" && document.body) {
+        return ReactDOM.createPortal(el, document.body);
+      }
+      return el;
+    }
+
+    /**
+     * The style a panel anchored to `rect` needs, in VIEWPORT coordinates. It is
+     * fixed on purpose — an absolutely positioned panel answers to the wrong
+     * containing block the moment it is portaled — and it keeps the anchor's
+     * right edge and opens 8px above the anchor's top edge, yielding width
+     * before position so the whole panel is always on screen.
+     * @param rect - the anchor's viewport rect, or null when there is none.
+     * @param vw - viewport width in px.
+     * @param vh - viewport height in px.
+     * @returns {{position: string, right: number, bottom: number, width: number,
+     *   height: number}|null} right/bottom are offsets from the viewport's
+     *   right/bottom edges.
+     */
+    function panelStyleFor(rect, vw, vh) {
+      if (!rect) return null;
+      const margin = 8;
+      const width = Math.min(440, Math.max(0, vw - 2 * margin));
+      const height = Math.min(480, Math.max(0, vh - 96));
+      const right = Math.min(Math.max(margin, vw - rect.right), Math.max(margin, vw - margin - width));
+      const bottom = Math.min(Math.max(margin, vh - rect.top + 8), Math.max(margin, vh - margin - height));
+      return {
+        position: "fixed",
+        right: Math.round(right),
+        bottom: Math.round(bottom),
+        width: Math.round(width),
+        height: Math.round(height),
+      };
+    }
+
+    /**
+     * panelStyleFor() for a live anchor node.
+     * @param anchor - the element the panel hangs off, or null.
+     * @returns the style, or null when there is no anchor to measure.
+     */
+    function measurePanelStyle(anchor) {
+      if (!anchor || typeof anchor.getBoundingClientRect !== "function") return null;
+      const win = globalThis.window;
+      const vw = win && win.innerWidth ? win.innerWidth : 1200;
+      const vh = win && win.innerHeight ? win.innerHeight : 800;
+      return panelStyleFor(anchor.getBoundingClientRect(), vw, vh);
+    }
 
     // ---- static CSS (guarded, idempotent across hot reloads) ----
     const CSS_ID = "model-chooser";
@@ -81,7 +138,13 @@ window.__ModuleLoader__.load({
         // Panel — the native menu surface (same token, radius 20 and
         // `--dsw-elevation-prominent` as the stock model menu) with a FIXED
         // size, so light and dark theming match the harness exactly.
-        ".mg-panel { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 20; display: flex; flex-direction: column; width: min(440px, 100vw - 32px); height: min(480px, 100vh - 96px); overflow: hidden; --mg-panel-bg: var(--dsw-specific-menu); background: var(--mg-panel-bg); border: 0; border-radius: 20px; box-shadow: var(--dsw-elevation-prominent, var(--dsw-shadow-lv3)); --dsw-elevation-stroke-color: var(--dsw-alias-border-l1); color: var(--dsw-alias-label-primary); --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2); --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2); }",
+        // The panel floats OUTSIDE the composer: it is portaled to <body> and
+        // placed in viewport coordinates (panelStyleFor), because anchored in
+        // there a 440px panel is cut by whatever clamps the composer's column —
+        // measured in the game studio 2026-09-19, where the left 86px of the
+        // panel vanished at a 380px conversation column. The right/bottom here
+        // are the fallback for a panel that has no measurement.
+        ".mg-panel { position: fixed; right: 12px; bottom: 12px; z-index: 20; display: flex; flex-direction: column; width: min(440px, 100vw - 32px); height: min(480px, 100vh - 96px); overflow: hidden; --mg-panel-bg: var(--dsw-specific-menu); background: var(--mg-panel-bg); border: 0; border-radius: 20px; box-shadow: var(--dsw-elevation-prominent, var(--dsw-shadow-lv3)); --dsw-elevation-stroke-color: var(--dsw-alias-border-l1); color: var(--dsw-alias-label-primary); --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2); --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2); }",
         ".mg-search { display: flex; align-items: center; gap: 6px; padding: 8px; border-bottom: 1px solid var(--dsw-alias-border-l2); }",
         ".mg-search input { flex: 1; min-width: 0; box-sizing: border-box; height: 30px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--dsw-alias-border-l3); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font: inherit; font-size: 13px; line-height: 20px; outline: none; }",
         ".mg-search input::placeholder { color: var(--dsw-alias-label-dimmed); }",
@@ -1083,6 +1146,36 @@ window.__ModuleLoader__.load({
           }, [props.available, props.load]);
 
           const [open, setOpen] = React.useState(false);
+          // The open panel is portaled and placed in viewport coordinates, so it
+          // is measured from the pill on every render — and re-measured when the
+          // window or the conversation moves under it. The tick value is never
+          // read: it exists to force that re-render.
+          const outerRef = React.useRef(null);
+          const [, setAnchorTick] = React.useState(0);
+          React.useLayoutEffect(() => {
+            if (!open) return;
+            const win = globalThis.window;
+            if (!win || typeof win.addEventListener !== "function") return;
+            // Only a real move re-renders: a scroll event that leaves the pill
+            // where it was must not cost a re-render of a list this long.
+            let last = "";
+            const onMove = () => {
+              const anchor = outerRef.current;
+              const rect = anchor && typeof anchor.getBoundingClientRect === "function"
+                ? anchor.getBoundingClientRect()
+                : null;
+              const key = rect === null ? "" : [rect.left, rect.top, rect.right, rect.bottom].join(",");
+              if (key === last) return;
+              last = key;
+              setAnchorTick((t) => t + 1);
+            };
+            win.addEventListener("resize", onMove);
+            win.addEventListener("scroll", onMove, true);
+            return () => {
+              win.removeEventListener("resize", onMove);
+              win.removeEventListener("scroll", onMove, true);
+            };
+          }, [open]);
           const [query, setQuery] = React.useState("");
           const [favOnly, setFavOnly] = React.useState(false);
           // localOnly: only models tagged "Local: yes" (local endpoint)
@@ -1542,7 +1635,11 @@ window.__ModuleLoader__.load({
             );
           }
 
-          return React.createElement("div", { className: "mg-outer" + (open ? " open" : "") },
+          // Where the open panel goes, in viewport coordinates. Inline it would
+          // be clipped by the composer's column whatever its z-index; see
+          // portalOrInline.
+          const panelStyle = open && !locked ? measurePanelStyle(outerRef.current) : null;
+          return React.createElement("div", { className: "mg-outer" + (open ? " open" : ""), ref: outerRef },
             React.createElement("div", { className: "mg-trigger-row" },
               React.createElement("button", {
                 type: "button",
@@ -1605,7 +1702,11 @@ window.__ModuleLoader__.load({
               "aria-label": "Close model picker",
               onClick: () => { setOpen(false); setTip(null); },
             }),
-            open && !locked && React.createElement("div", { className: "mg-panel", role: "listbox" },
+            open && !locked && portalOrInline(React.createElement("div", {
+              className: "mg-panel",
+              role: "listbox",
+              style: panelStyle,
+            },
               React.createElement("div", { className: "mg-search" },
                 React.createElement("input", {
                   type: "text",
@@ -1826,7 +1927,7 @@ window.__ModuleLoader__.load({
                   ? (refreshResult.error ? "⟳ " + refreshResult.error : "⟳ " + refreshResult.summary)
                   : "prices: models.dev")
               )
-            ),
+            )),
             (function () {
               if (!tip || locked || !open) return null;
               const vw = typeof window === "undefined" ? 1200 : window.innerWidth;
@@ -1874,15 +1975,11 @@ window.__ModuleLoader__.load({
                   React.createElement("span", null, "Local: " + (localFor(tip.g.id, tip.m.id) ? "yes" : "no"))
                 )
               );
-              // Portal to <body>: the composer creates its own stacking
-              // context, so an inline fixed tooltip loses against the chat
-              // history no matter the z-index. Through the portal the
-              // tooltip always floats above everything; it still closes on
-              // mouse-leave / picker close like before.
-              if (ReactDOM && typeof document !== "undefined" && document.body) {
-                return ReactDOM.createPortal(tipEl, document.body);
-              }
-              return tipEl;
+              // Portaled like the panel (portalOrInline): the composer's
+              // column clamps its overflow, and a tooltip cut off at that edge
+              // would be unreadable exactly where it is needed. It still closes
+              // on mouse-leave / picker close like before.
+              return portalOrInline(tipEl);
             })(),
             // ---- Session cost breakdown popup (hover over the cost figure) ----
             // Sized exactly like the Model Chooser panel and parked parallel
@@ -1912,12 +2009,6 @@ window.__ModuleLoader__.load({
                   width: w,
                   height: Math.min(h, vh - 16),
                 };
-              }
-              function portalOrInline(el) {
-                if (ReactDOM && typeof document !== "undefined" && document.body) {
-                  return ReactDOM.createPortal(el, document.body);
-                }
-                return el;
               }
               const popHover = { onMouseEnter: cancelHistClose, onMouseLeave: scheduleHistClose };
               if (histErr) {
