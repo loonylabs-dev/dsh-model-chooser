@@ -43,6 +43,7 @@
     "test/cost-endpoint.test.js",
     "cordis.patch.yml",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     "SECURITY.md",
     "docs"

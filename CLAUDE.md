@@ -30,6 +30,10 @@ session and were paid for once.
   is dead. Measured 2026-09-18: a single non-existent inject name took the whole
   interface down and every check available here stayed green. Loading the page once
   after a restart belongs to the change, not to the user.
+- **A behavior change updates `CHANGELOG.md` in the same commit**, newest version
+  first, claim-first prose in the house style. The version says which kind it was:
+  a feature addition bumps the minor (`0.x.0`), anything else — fix, documentation,
+  tests, manifest — the patch (`0.0.x`).
 
 ## Hard rules, each one paid for
 
