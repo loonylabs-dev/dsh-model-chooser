@@ -61,6 +61,7 @@ The screenshot comes from a real session on `0.1.0-rc.7`, with the local PX13 ga
 - **💸 Live per-task usage & cost** — real provider-reported token usage (from the session log) is **always shown** while the panel is open (`in / out / cache`). Each model's usage is multiplied by **its own** (reference) price — properly attributed even when a session switched models mid-way — the same math OpenCode uses (`usage × price`, not a heuristic)
 - **🧾 Session cost breakdown** — hover the `approx cost` figure for a popup **sized like the picker and parked parallel on its left (1 px gap)**: a **table-style breakdown** with per-model totals (steps, In/Out/Cache in their own columns, ≈ cost) and a **timestamped step table**. **Clickable column headers** work like Excel / the main list (asc → desc → off, ▲/▼ indicator) on both tables; **copy** the summary or **export the (sorted) step list as CSV** (Excel-ready). The invisible hover target spans the cost row all the way to its left edge. Attribution of each step to its model comes straight from the session log (`request/context` events); nothing extra is stored
 - **🖱️ Detail tooltip** that opens *beside* the panel (never covers the list): description, price, context window, max output, reasoning efforts
+- **📐 Never cut off by a narrow column** — the panel floats in viewport coordinates (portaled to the page body, clamped to the window), so a host that keeps the composer in a narrow column still shows all of it. It may overlap the neighbouring column instead of losing its left side — measured in the game studio 2026-09-19: a 380px column cut 179px off the 440px panel before this
 - **🎨 Native look** — built on the harness design tokens only (`--dsw-alias-*`, `--dsw-elevation-prominent`, `--dsw-specific-menu`); the picker panel and the effort menu use the **native menu geometry** (radius 20 px, elevation stroke, no border, no artificial darkening of the surface), while the detail tooltip and the cost popup are 12 px cards on the same surface token — light & dark themes follow the harness exactly
 
 ## How it works
@@ -189,10 +190,10 @@ Favorites, collapsed providers, the hidden-models/provider blacklist (`dsh.model
 ## Verification & Testing
 
 ```bash
-npm test   # 41 tests, under a second: host routes, refresh arithmetic, and the dialog
+npm test   # 45 tests, under a second: host routes, refresh arithmetic, the dialog, and where the panel lands
 ```
 
-The three lanes are described in [CONTRIBUTING.md](CONTRIBUTING.md). The one that covers the delegation dialog loads `client.js` through the harness's own module seam with React stubbed out, so the rendered list and the answers it delivers are asserted without a browser.
+The lanes are described in [CONTRIBUTING.md](CONTRIBUTING.md). The two that cover the client half load `client.js` through the harness's own module seam with React stubbed out, so the dialog's rendered list and the answers it delivers — and the seat panel's placement — are asserted without a browser.
 
 Two checks against a running server:
 

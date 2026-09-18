@@ -41,15 +41,16 @@ Nine rules govern changes to this repository. Each was paid for once; the inline
 ## Testing
 
 ```sh
-npm test   # 41 tests, under a second; no harness packages, no browser
+npm test   # 45 tests, under a second; no harness packages, no browser
 ```
 
-Three lanes, all in this package:
+Four files, three lanes, all in this package:
 
 * `test/cost-endpoint.test.js`, `test/refresh-endpoint.test.js`, `test/refresh-core.test.js` — the host routes and the refresh arithmetic, with the two external things faked (the settings file and the provider APIs).
 * `test/delegation-chooser.client.test.js` — the client half. It loads `client.js` through the same `window.__ModuleLoader__.load()` seam the harness uses, with React replaced by a recording stub, so the dialog's rendered tree and the answers it delivers are asserted without a browser. A change to the dialog's behaviour belongs here.
+* `test/panel-placement.client.test.js` — the same seam, with hooks that can re-render and a ReactDOM that records portals, so the seat's panel can be clicked open and measured. It asserts that the panel leaves the composer's subtree and lands clamped inside the viewport; it is the guard for the one defect a stylesheet cannot fix (a host column that clips its overflow).
 
-The seat itself has no automated coverage; a change to it is verified by hand in a running `dsh web`.
+The seat's list itself has no automated coverage; a change to it is verified by hand in a running `dsh web`.
 
 ## Commits
 

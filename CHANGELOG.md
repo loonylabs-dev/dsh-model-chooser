@@ -4,7 +4,7 @@ Notable changes to `dsh-model-chooser`, newest first. A feature addition bumps t
 minor (`0.x.0`); a fix, a documentation change, or a manifest change bumps the
 patch (`0.0.x`).
 
-## Unreleased
+## 0.1.2
 
 ### Fixed
 
@@ -14,12 +14,17 @@ patch (`0.0.x`).
   column — and DSH's conversation column clamps its own overflow while a session
   is active (`overflow: hidden` on the conversation root in its
   `data-phase=active` state, `overflow: hidden auto` on the scroll body), which
-  cut exactly that part away. Measured in the game studio 2026-09-19 at a 380px
-  column: the panel lost its left 86px, which the user reads as "the panel is
-  behind the preview". No z-index could have won that — a clip is not a stacking
-  question. The panel is now portaled to `<body>`, like this plugin's tooltip and
-  cost popup already were, and placed in viewport coordinates from the pill's own
-  rect, yielding width before position so it always stays fully on screen.
+  cut exactly that part away. Measured in the game studio 2026-09-19 in headless
+  Chrome at a 380px conversation column: 179px of the panel lay left of the
+  column and the pixel just inside the panel's own left edge belonged to the
+  composer's backdrop, not to the panel — which the user reads as "the panel is
+  behind the preview". No z-index could have won that: a clip is not a stacking
+  question, and `overflow-x` cannot be `visible` while `overflow-y` is `auto`. The
+  panel is now portaled to `<body>`, like this plugin's tooltip and cost popup
+  already were, and placed in viewport coordinates from the pill's own rect,
+  yielding width before position so it always stays fully on screen (it may
+  overlap a neighbouring column instead of being cut). The same probe that showed
+  the old build failing answers `mg-panel` at that pixel now.
   `test/panel-placement.client.test.js` pins the portal and the geometry down.
 
 ## 0.1.1
